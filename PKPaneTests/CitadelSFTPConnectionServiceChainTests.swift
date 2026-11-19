@@ -731,6 +731,133 @@ struct CitadelSFTPConnectionServiceChainTests {
     #expect(await fixture.recorder.offers(for: "gateway:2222") == [.privateKey])
   }
 
+  @Test("本番の鍵読込は保存済みパスフレーズで暗号化Ed25519鍵を使って接続する")
+  func productionLoaderUsesStoredPassphraseForEncryptedEd25519Key() async throws {
+    let fixture = try makeFixture(authenticationMode: .singleOfferPerDial, keyLoader: nil)
+    defer { fixture.cleanUp() }
+    let target = try SFTPConnectionTarget(host: "gateway", port: 2222, username: "ops")
+    let keyURL = try writeOpenSSHKeyFixture(Self.encryptedEd25519Key)
+    defer { try? FileManager.default.removeItem(at: keyURL) }
+    try fixture.privateKeys.save(keyURL, for: target.finalHop)
+    try fixture.passwordStore.save(
+      Self.fixturePassphrase, for: target.finalHop, kind: .passphrase(keyPath: keyURL.path))
+
+    let session = try await fixture.service.connect(
+      to: target, intent: .background, hopProgress: nil)
+    try await session.close()
+
+    #expect(await fixture.recorder.directAddresses() == ["gateway:2222"])
+    #expect(await fixture.recorder.offers(for: "gateway:2222") == [.privateKey])
+    #expect(await fixture.prompter.requests().isEmpty)
+  }
+
+  @Test("本番の鍵読込は暗号化Ed25519鍵のパスフレーズを対話接続で1回だけ求める")
+  func productionLoaderPromptsOnceForEncryptedEd25519Key() async throws {
+    let fixture = try makeFixture(
+      authenticationMode: .singleOfferPerDial,
+      promptAnswers: [SFTPCredentialAnswer(secret: Self.fixturePassphrase, saveToKeychain: false)],
+      keyLoader: nil)
+    defer { fixture.cleanUp() }
+    let target = try SFTPConnectionTarget(host: "gateway", port: 2222, username: "ops")
+    let keyURL = try writeOpenSSHKeyFixture(Self.encryptedEd25519Key)
+    defer { try? FileManager.default.removeItem(at: keyURL) }
+    try fixture.privateKeys.save(keyURL, for: target.finalHop)
+
+    let session = try await fixture.service.connect(
+      to: target, intent: .userInitiated, hopProgress: nil)
+    try await session.close()
+
+    let requests = await fixture.prompter.requests()
+    #expect(requests.count == 1)
+    let request = try #require(requests.first)
+    #expect(request.hop == target.finalHop)
+    #expect(request.kind == .passphrase(keyPath: keyURL.path))
+    #expect(request.attempt == 1)
+    #expect(await fixture.recorder.directAddresses() == ["gateway:2222"])
+    #expect(await fixture.recorder.offers(for: "gateway:2222") == [.privateKey])
+  }
+
+  @Test("本番の鍵読込は暗号化されていないOpenSSH ECDSA P-256鍵で接続する")
+  func productionLoaderUsesUnencryptedECDSAP256Key() async throws {
+    let fixture = try makeFixture(authenticationMode: .singleOfferPerDial, keyLoader: nil)
+    defer { fixture.cleanUp() }
+    let target = try SFTPConnectionTarget(host: "gateway", port: 2222, username: "ops")
+    let keyURL = try writeOpenSSHKeyFixture(Self.unencryptedECDSAP256Key)
+    defer { try? FileManager.default.removeItem(at: keyURL) }
+    try fixture.privateKeys.save(keyURL, for: target.finalHop)
+
+    let session = try await fixture.service.connect(
+      to: target, intent: .background, hopProgress: nil)
+    try await session.close()
+
+    #expect(await fixture.recorder.directAddresses() == ["gateway:2222"])
+    #expect(await fixture.recorder.offers(for: "gateway:2222") == [.privateKey])
+  }
+
+  @Test("直接接続と踏み台経由の各ホップでAES-128-CTRだけを追加する")
+  func addsOnlyAES128CTRToEveryHop() async throws {
+    let fixture = try makeFixture()
+    defer { fixture.cleanUp() }
+    let target = try twoHopTarget()
+
+    let session = try await fixture.service.connect(
+      to: target, intent: .background, hopProgress: nil)
+    try await session.close()
+
+    let settingsByHop = await fixture.recorder.dialSettings()
+    #expect(settingsByHop.map { "\($0.host):\($0.port)" } == ["gateway:2222", "files.example:22"])
+    for settings in settingsByHop {
+      let address = "\(settings.host):\(settings.port)"
+      let keepsDefaultKeyExchange = settings.algorithms.keyExchangeAlgorithms == nil
+      let keepsDefaultPublicKeys = settings.algorithms.publicKeyAlgorihtms == nil
+      #expect(keepsDefaultKeyExchange, "\(address)")
+      #expect(keepsDefaultPublicKeys, "\(address)")
+      guard case .add(let schemes) = settings.algorithms.transportProtectionSchemes else {
+        Issue.record("\(address) の暗号設定に追加指定がありません。")
+        continue
+      }
+      #expect(
+        schemes.map { ObjectIdentifier($0) } == [ObjectIdentifier(AES128CTR.self)], "\(address)")
+    }
+  }
+
+  // 使い捨てのテスト専用鍵。
+  private static let fixturePassphrase = "pkpane-test-passphrase"
+  private static let openSSHPrivateKeyHeader = "-----BEGIN OPENSSH " + "PRIVATE KEY-----"
+
+  private static let encryptedEd25519Key = """
+    \(openSSHPrivateKeyHeader)
+    b3BlbnNzaC1rZXktdjEAAAAACmFlczI1Ni1jdHIAAAAGYmNyeXB0AAAAGAAAABBUCKZKSW
+    +njxALCIO9Bs61AAAAGAAAAAEAAAAzAAAAC3NzaC1lZDI1NTE5AAAAIJgasoiihOkOiuvH
+    jSdBo2SrRDyFgjmXF0rov8HKGRdUAAAAoHtT26lrcaipUXeqwcdMAX+fKWrv8XGh57Sgi0
+    AydseHAx04tVZYig6yrF5txk718HeVeEQ5YcydfunxPy749zkUGarifcPGBVTMHx9fZ56I
+    X4MfrrzSqt9gF7NHScsSucALUAgno+OXzm1wVCzWghD7gyRPzL2+jkj5z3HRO15iZlEk3E
+    j/rQSBkPa6r8bcJiBpDgzaBgd8mBuQBRQBCoM=
+    -----END OPENSSH PRIVATE KEY-----
+    """ + "\n"
+
+  private static let unencryptedECDSAP256Key = """
+    \(openSSHPrivateKeyHeader)
+    b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAaAAAABNlY2RzYS
+    1zaGEyLW5pc3RwMjU2AAAACG5pc3RwMjU2AAAAQQQ8bamcRsesrfFmezCIUp8lgxi+lrK7
+    bjqW/ttEPKMSrveE51Id5nSHOK9aq3vE+IjWpQVyFs8SIQb13RcrCoYEAAAAsLXzWkG181
+    pBAAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBDxtqZxGx6yt8WZ7
+    MIhSnyWDGL6WsrtuOpb+20Q8oxKu94TnUh3mdIc4r1qre8T4iNalBXIWzxIhBvXdFysKhg
+    QAAAAgWjzzjSGitMNkjJh60jIfPexc1dsKnMpB1/Xqw5drAisAAAATcGtwYW5lLXRlc3Qt
+    Zml4dHVyZQECAwQF
+    -----END OPENSSH PRIVATE KEY-----
+    """ + "\n"
+
+  private func writeOpenSSHKeyFixture(_ key: String) throws -> URL {
+    let url = FileManager.default.temporaryDirectory.appending(path: "pkpane-key-\(UUID())")
+    try #require(
+      FileManager.default.createFile(
+        atPath: url.path,
+        contents: Data(key.utf8),
+        attributes: [.posixPermissions: 0o600]))
+    return url
+  }
+
   private func makePrivateKeyURL() throws -> URL {
     // テスト専用の鍵をリポジトリ内のビルド領域に生成し、実ユーザーの鍵を参照しない。
     let root = URL(filePath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
@@ -753,7 +880,7 @@ struct CitadelSFTPConnectionServiceChainTests {
     authenticationFailures: [String: Set<Int>] = [:],
     availableMethods: NIOSSHAvailableUserAuthenticationMethods = [.publicKey, .password],
     events: ChainLockedValue<[String]> = ChainLockedValue([]),
-    keyLoader: @escaping @Sendable (URL, String?) throws -> NIOSSHPrivateKey = { url, passphrase in
+    keyLoader: (@Sendable (URL, String?) throws -> NIOSSHPrivateKey)? = { url, passphrase in
       let key = try String(contentsOf: url, encoding: .utf8)
       return NIOSSHPrivateKey(
         ed25519Key: try .init(sshEd25519: key, decryptionKey: passphrase.map { Data($0.utf8) }))
@@ -776,15 +903,28 @@ struct CitadelSFTPConnectionServiceChainTests {
     let (defaults, suiteName) = isolatedDefaults()
     let trustStore = SFTPHostKeyTrustStore(defaults: defaults)
     let credentialCache = SFTPSessionCredentialCache()
-    // 製品実装前の確定用注入口: ダイヤル前の復号を同期フェイクで検証する。
-    let service = CitadelSFTPConnectionService(
-      passwordStore: passwordStore,
-      privateKeyRepository: privateKeys,
-      hostKeyValidatorFactory: CitadelSFTPHostKeyValidatorFactory(trustStore: trustStore),
-      hopConnector: { settings in try await network.connect(settings: settings) },
-      credentialPrompter: prompter,
-      credentialCache: credentialCache,
-      keyLoader: keyLoader)
+    let validatorFactory = CitadelSFTPHostKeyValidatorFactory(trustStore: trustStore)
+    let hopConnector: SSHHopConnector = { settings in try await network.connect(settings: settings)
+    }
+    let service: CitadelSFTPConnectionService
+    if let keyLoader {
+      service = CitadelSFTPConnectionService(
+        passwordStore: passwordStore,
+        privateKeyRepository: privateKeys,
+        hostKeyValidatorFactory: validatorFactory,
+        hopConnector: hopConnector,
+        credentialPrompter: prompter,
+        credentialCache: credentialCache,
+        keyLoader: keyLoader)
+    } else {
+      service = CitadelSFTPConnectionService(
+        passwordStore: passwordStore,
+        privateKeyRepository: privateKeys,
+        hostKeyValidatorFactory: validatorFactory,
+        hopConnector: hopConnector,
+        credentialPrompter: prompter,
+        credentialCache: credentialCache)
+    }
 
     if authenticationMode == .none {
       // 認証自体を対象にしない既存チェーンテストには保存済み資格情報を用意する。
@@ -900,7 +1040,7 @@ private final class FakeHopNetwork: @unchecked Sendable {
   ) async throws -> any SSHHopTransport {
     let address = "\(settings.host):\(settings.port)"
     events.withValue { $0.append("dial:\(address)") }
-    let dial = await recorder.recordConnection(address, isJump: isJump)
+    let dial = await recorder.recordConnection(settings, isJump: isJump)
 
     if validateHostKey {
       try validate(settings: settings)
@@ -1000,6 +1140,7 @@ private final class FakeSSHHopTransport: SSHHopTransport, @unchecked Sendable {
 }
 
 private actor HopTransportRecorder {
+  private var settingsByHop: [SSHClientSettings] = []
   private var connected: [String] = []
   private var direct: [String] = []
   private var jumped: [String] = []
@@ -1009,7 +1150,9 @@ private actor HopTransportRecorder {
   private var closed: [String] = []
   private var baseSessionCloseCount = 0
 
-  func recordConnection(_ address: String, isJump: Bool) -> Int {
+  func recordConnection(_ settings: SSHClientSettings, isJump: Bool) -> Int {
+    let address = "\(settings.host):\(settings.port)"
+    settingsByHop.append(settings)
     connected.append(address)
     if isJump {
       jumped.append(address)
@@ -1039,6 +1182,7 @@ private actor HopTransportRecorder {
     baseSessionCloseCount += 1
   }
 
+  func dialSettings() -> [SSHClientSettings] { settingsByHop }
   func connectedAddresses() -> [String] { connected }
   func directAddresses() -> [String] { direct }
   func jumpedAddresses() -> [String] { jumped }
