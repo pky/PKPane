@@ -471,11 +471,14 @@ struct CitadelSFTPConnectionService: SFTPConnecting, @unchecked Sendable {
     authentication: PreparedAuthentication,
     validation: SFTPHostKeyValidation
   ) -> SSHClientSettings {
-    SSHClientSettings(
+    var settings = SSHClientSettings(
       host: hop.host,
       port: hop.port,
       authenticationMethod: { authentication.makeMethod() },
       hostKeyValidator: validation.validator)
+    // 既定の Dropbear など、AES-GCM を提示しないサーバーとの接続に使う。
+    settings.algorithms.transportProtectionSchemes = .add([AES128CTR.self])
+    return settings
   }
 
   static func hostKeyError(
@@ -744,7 +747,7 @@ private struct OpenSSHKeyReader {
   }
 
   mutating func readData() -> Data? {
-    guard let length = readUInt32(), length <= UInt32(Int.max) else { return nil }
+    guard let length = readUInt32() else { return nil }
     return readBytes(count: Int(length))
   }
 
