@@ -1,0 +1,55 @@
+# 非公開のプロダクト資料・作業記録
+# doc/ は公開する文書だけを個別に許可する。新しく置いた資料は既定で非公開になる。
+/doc/*
+!/doc/KEYMAP.md
+!/doc/LICENSES.md
+/tasks/
+/PATHFINDER-*/
+/product.md
+/AGENTS.md
+/REVIEW.md
+/ROADMAP.md
+/progress.txt
+
+# エージェントの設定と作業記録
+/.claude/
+/.codex/
+/.agents/
+/.superpowers/
+
+# 個人の署名・コミット設定
+/Config/Signing.local.xcconfig
+/.gitconfig.local
+
+# XcodeGen 生成物
+/PKPane.xcodeproj/
+/.xcodegen/
+
+# ビルド・テストの生成物
+/.derived-data/
+/.derived-data2/
+/.derived-data-*/
+build/
+DerivedData/
+.build/
+.swiftpm/
+*.xcresult
+*.xcarchive
+*.ipa
+default.profraw
+xcuserdata/
+*.xcuserstate
+
+# ローカル環境のファイル
+.DS_Store
+.env*
+*.log
+__pycache__/
+
+# 公開用静的サイト（グローバル除外の index.html を上書きする）
+!/site/
+!/site/index.html
+!/site/support/
+!/site/support/index.html
+!/site/privacy/
+!/site/privacy/index.html

@@ -1,0 +1,64 @@
+# SFTP認証方式の行列テスト用サーバー群。scripts/rv26_sftp_auth_matrix.py からだけ起動する。
+# 資格情報は環境変数で渡す(argvやファイルへ出さない)。公開は 127.0.0.1 の空きポートのみ。
+x-credentials: &credentials
+  PKPANE_MATRIX_PASSWORD: ${PKPANE_MATRIX_PASSWORD:?}
+  PKPANE_MATRIX_AUTHORIZED_KEY: ${PKPANE_MATRIX_AUTHORIZED_KEY:?}
+
+services:
+  password-only:
+    build:
+      context: ./openssh
+      args:
+        BASE_IMAGE: debian:bookworm-slim
+    # 同じ Dockerfile でもサービスごとに別イメージ名にする(同名を並列ビルドすると compose が衝突する)。
+    image: pkpane-rv26-matrix-openssh-password-only
+    environment:
+      <<: *credentials
+      SSHD_VARIANT: password-only
+    ports:
+      - "127.0.0.1::22"
+
+  keyboard-interactive-only:
+    build:
+      context: ./openssh
+      args:
+        BASE_IMAGE: debian:bookworm-slim
+    image: pkpane-rv26-matrix-openssh-kbd-interactive-only
+    environment:
+      <<: *credentials
+      SSHD_VARIANT: kbd-interactive-only
+    ports:
+      - "127.0.0.1::22"
+
+  publickey-only:
+    build:
+      context: ./openssh
+      args:
+        BASE_IMAGE: debian:bookworm-slim
+    image: pkpane-rv26-matrix-openssh-identity-only
+    environment:
+      <<: *credentials
+      SSHD_VARIANT: identity-only
+    ports:
+      - "127.0.0.1::22"
+
+  openssh-8:
+    build:
+      context: ./openssh
+      args:
+        BASE_IMAGE: ubuntu:22.04
+    image: pkpane-rv26-matrix-openssh-jammy
+    environment:
+      <<: *credentials
+      SSHD_VARIANT: both
+    ports:
+      - "127.0.0.1::22"
+
+  dropbear:
+    build:
+      context: ./dropbear
+    image: pkpane-rv26-matrix-dropbear
+    environment:
+      <<: *credentials
+    ports:
+      - "127.0.0.1::22"

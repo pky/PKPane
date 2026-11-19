@@ -1,0 +1,4 @@
+// アプリのバージョンはここだけで指定する。
+// PKPane.xcodeproj は project.yml から生成され直すため、Xcode の General タブで変えた値は消える。
+MARKETING_VERSION = 0.1.1
+CURRENT_PROJECT_VERSION = 0.1.1

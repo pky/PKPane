@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="PKPaneのサポート情報、動作環境、よくある質問、問い合わせ先。">
+  <meta name="theme-color" content="#111827">
+  <link rel="canonical" href="https://pkpane.pky.jp/support/">
+  <link rel="icon" href="../assets/app-icon.png">
+  <link rel="stylesheet" href="../assets/site.css">
+  <title>サポート — PKPane</title>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="../" aria-label="PKPane ホーム">
+      <img src="../assets/app-icon.png" width="44" height="44" alt="">
+      <span>PKPane</span>
+    </a>
+    <nav aria-label="メインナビゲーション">
+      <a href="../">概要</a>
+      <a aria-current="page" href="./">サポート</a>
+      <a href="../privacy/">プライバシー</a>
+    </nav>
+  </header>
+
+  <main class="document">
+    <header class="page-title">
+      <p class="eyebrow">Support</p>
+      <h1>PKPaneサポート</h1>
+      <p class="lead">利用方法や不具合については、以下の情報をご確認のうえお問い合わせください。</p>
+    </header>
+
+    <section aria-labelledby="environment-title">
+      <h2 id="environment-title">動作環境</h2>
+      <ul>
+        <li>macOS 15以降</li>
+        <li>Apple Silicon搭載Mac</li>
+      </ul>
+    </section>
+
+    <section aria-labelledby="faq-title">
+      <h2 id="faq-title">よくある質問</h2>
+
+      <details>
+        <summary>ローカルフォルダを開くには？</summary>
+        <p>サイドバーの「フォルダを追加」からフォルダを選択してください。PKPaneは選択したフォルダへのアクセス許可を保存し、次回起動時に復元します。保護された場所はmacOS側の許可が別途必要になる場合があります。</p>
+      </details>
+
+      <details>
+        <summary>NAS、SFTP、FTP/FTPSへ接続するには？</summary>
+        <p>接続画面からSMB、SFTP、FTPの接続情報を入力します。SFTPの初回接続では、接続先が正しいことを確認するためホスト鍵を表示します。FTPは証明書を検証する明示的FTPSが既定です。平文FTPを選ぶと資格情報と通信内容が暗号化されない警告を表示します。</p>
+      </details>
+
+      <details>
+        <summary>対応しているアーカイブ形式は？</summary>
+        <p>ZIPと7zは作成・展開できます。ZIP、7z、tar、tar.gz、tar.bz2、tar.xz、gz、bz2、xz、RARはアプリ内で閲覧・展開できます。パスワード付き7zと、7z作成時の空フォルダ保持には対応していません。</p>
+      </details>
+
+      <details>
+        <summary>他のアプリからフォルダを開くとFinderが起動する</summary>
+        <p>他のアプリがmacOSの「Finderで表示」機能を使用している場合、Finderが直接起動します。この動作は呼び出し元アプリとmacOSによるもので、PKPaneへ変更できません。通常の「このアプリケーションで開く」に対応した画面では、フォルダを開く候補としてPKPaneを選択できます。</p>
+      </details>
+
+      <details>
+        <summary>SFTPやFTP上のフォルダを削除するとどうなる？</summary>
+        <p>SFTPとFTPにはmacOSのゴミ箱がないため、確認後にフォルダの中身を含めて完全に削除します。この操作は元に戻せません。</p>
+      </details>
+    </section>
+
+    <section class="contact" aria-labelledby="contact-title">
+      <h2 id="contact-title">お問い合わせ</h2>
+      <p><a class="button" href="mailto:support@pky.jp">support@pky.jpへメール</a></p>
+      <p>お問い合わせには、macOSのバージョン、PKPaneのバージョン、再現手順、表示されたエラーメッセージを添えてください。パスワード、秘密鍵、個人情報、実際のユーザーファイルは送らないでください。</p>
+    </section>
+
+    <section class="english" lang="en" aria-labelledby="english-support-title">
+      <p class="eyebrow">English</p>
+      <h2 id="english-support-title">Support</h2>
+      <p>PKPane requires macOS 15 or later and an Apple silicon Mac. For support, email <a href="mailto:support@pky.jp">support@pky.jp</a> with your macOS version, PKPane version, steps to reproduce, and the displayed error message.</p>
+      <p>Do not send passwords, private keys, personal information, or actual user files.</p>
+      <p>If another app explicitly uses the macOS “Show in Finder” action, Finder opens directly and cannot be replaced by PKPane.</p>
+      <p>Use the connection panel for SMB, SFTP, FTP, or explicit FTPS. Explicit FTPS validates the server certificate. Plain FTP displays a warning because credentials and traffic are not encrypted.</p>
+    </section>
+  </main>
+
+  <footer>
+    <span>© 2026 PKPane</span>
+    <span><a href="../privacy/">プライバシーポリシー</a></span>
+  </footer>
+</body>
+</html>

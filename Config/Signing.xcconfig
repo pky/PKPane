@@ -1,0 +1,4 @@
+// 開発機ごとの署名チームはGit管理外の設定で指定する。
+// ローカル設定がない環境では、呼び出し側の署名設定を使用する。
+#include? "Signing.local.xcconfig"
+#include "Version.xcconfig"

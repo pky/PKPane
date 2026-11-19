@@ -1,0 +1,211 @@
+name: PKPane
+
+options:
+  minimumXcodeGenVersion: 2.45.4
+  defaultSourceDirectoryType: syncedFolder
+  deploymentTarget:
+    macOS: "15.0"
+  developmentLanguage: ja
+  defaultConfig: Debug
+  createIntermediateGroups: true
+
+# バージョンとビルド番号はこのファイルで指定する。Xcode のナビゲータから開けるよう載せておく。
+fileGroups:
+  - Config/Version.xcconfig
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    MACOSX_DEPLOYMENT_TARGET: "15.0"
+    ARCHS: arm64
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    SWIFT_INCLUDE_PATHS:
+      - $(SRCROOT)/Config/CBZip2
+
+packages:
+  Citadel:
+    url: https://github.com/orlandos-nl/Citadel
+    exactVersion: 0.12.1
+  NIOSSH:
+    url: https://github.com/Wellz26/swift-nio-ssh.git
+    exactVersion: 0.3.6
+  NIO:
+    url: https://github.com/apple/swift-nio.git
+    exactVersion: 2.101.3
+  SnapshotTesting:
+    url: https://github.com/pointfreeco/swift-snapshot-testing
+    exactVersion: 1.19.2
+  ZIPFoundation:
+    url: https://github.com/weichsel/ZIPFoundation.git
+    exactVersion: 0.9.20
+  PLzmaSDK:
+    url: https://github.com/OlehKulykov/PLzmaSDK.git
+    # 1.6.1と同じコミット。unsafeFlagsを持つproductはrevision固定で利用する。
+    revision: f449bc3e13204b68a7e05fca80ce8c31642085ec
+  SWCompression:
+    url: https://github.com/tsolomko/SWCompression.git
+    exactVersion: 4.9.1
+  Unrar:
+    url: https://github.com/mtgto/Unrar.swift.git
+    exactVersion: 0.5.4
+  SMBClient:
+    url: https://github.com/kishikawakatsumi/SMBClient.git
+    exactVersion: 0.3.1
+
+targets:
+  PKPane:
+    type: application
+    platform: macOS
+    sources:
+      - path: PKPane
+    dependencies:
+      - package: Citadel
+      - package: NIOSSH
+        product: NIOSSH
+      - package: NIO
+        product: NIO
+      - package: NIO
+        product: NIOTLS
+      - package: ZIPFoundation
+      - package: PLzmaSDK
+      - package: SWCompression
+      - package: Unrar
+      - package: SMBClient
+      - sdk: NetFS.framework
+      - sdk: libz.tbd
+      - sdk: libbz2.tbd
+    configFiles:
+      Debug: Config/Signing.xcconfig
+      Release: Config/Signing.xcconfig
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.pky.PKPane
+        PRODUCT_NAME: PKPane
+        INFOPLIST_FILE: Config/PKPane-Info.plist
+        # 個人開発チーム(無料)はiCloud capabilityをプロビジョニングできないため、
+        # 既定のentitlementsにはiCloud KVSを含めない(お気に入り同期は実行時ゲートで休眠)。
+        # 有料のDeveloper Program加入後はConfig/PKPane-icloud.entitlementsへ切り替える。
+        CODE_SIGN_ENTITLEMENTS: Config/PKPane.entitlements
+        CODE_SIGN_STYLE: Automatic
+        # ad-hoc署名はdesignated requirementがビルドごとのcdhash直値になり、
+        # リビルドのたびにTCC権限(フルディスクアクセス等)が無効化される。
+        # Spotlight検索(このMac)はmdsがアプリのTCC権限で結果をフィルタするため、
+        # 権限が無効だと常に0件になる。実署名で署名要件を安定させる。
+        ENABLE_HARDENED_RUNTIME: YES
+        # MARKETING_VERSION と CURRENT_PROJECT_VERSION は Config/Version.xcconfig で指定する。
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+
+  PKPaneTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: PKPaneTests
+    dependencies:
+      - target: PKPane
+      - package: NIO
+        product: NIOEmbedded
+      - package: ZIPFoundation
+      - package: PLzmaSDK
+      - package: SWCompression
+      - package: Unrar
+      - sdk: libz.tbd
+      - sdk: libbz2.tbd
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.pky.PKPaneTests
+        GENERATE_INFOPLIST_FILE: YES
+
+  PKPaneSnapshotTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: PKPaneSnapshotTests
+    dependencies:
+      - target: PKPane
+      - package: SnapshotTesting
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.pky.PKPaneSnapshotTests
+        GENERATE_INFOPLIST_FILE: YES
+
+  PKPaneUITests:
+    type: bundle.ui-testing
+    platform: macOS
+    sources:
+      - path: PKPaneUITests
+    dependencies:
+      - target: PKPane
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.pky.PKPaneUITests
+        GENERATE_INFOPLIST_FILE: YES
+
+schemes:
+  PKPane:
+    build:
+      targets:
+        PKPane: all
+        PKPaneTests: [test]
+        PKPaneSnapshotTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      gatherCoverageData: true
+      coverageTargets:
+        - PKPane
+      targets:
+        - name: PKPaneTests
+          # 直列+ランダム順を正式運用とする(2026-09-08裁定)。注入化ウェーブで共有TransferQueueは
+          # 全テスト注入済みだが、プロセス内並列はMainActor拘束テストが大半のため直列55秒に対し
+          # 並列289秒と遅く、利得がない。並列へ戻す提案は同条件の計測結果を添えること。
+          parallelizable: false
+          randomExecutionOrder: true
+        - name: PKPaneSnapshotTests
+          parallelizable: false
+          randomExecutionOrder: false
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release
+
+  PKPane-All:
+    build:
+      targets:
+        PKPane: all
+        PKPaneTests: [test]
+        PKPaneSnapshotTests: [test]
+        PKPaneUITests: [test]
+    test:
+      config: Debug
+      gatherCoverageData: true
+      environmentVariables:
+        PKPANE_RV26_MEASUREMENTS: "$(PKPANE_RV26_MEASUREMENTS)"
+        PKPANE_RV26_FTP_WIRE_CONFIG: "$(PKPANE_RV26_FTP_WIRE_CONFIG)"
+        PKPANE_RV26_SFTP_WIRE_CONFIG: "$(PKPANE_RV26_SFTP_WIRE_CONFIG)"
+        PKPANE_RV26_SFTP_MATRIX_CONFIG: "$(PKPANE_RV26_SFTP_MATRIX_CONFIG)"
+        PKPANE_RV26_SFTP_JUMP_CONFIG: "$(PKPANE_RV26_SFTP_JUMP_CONFIG)"
+        PKPANE_LIVE_FTP_HOST: "$(PKPANE_LIVE_FTP_HOST)"
+        PKPANE_LIVE_FTP_PORT: "$(PKPANE_LIVE_FTP_PORT)"
+        PKPANE_LIVE_FTP_USERNAME: "$(PKPANE_LIVE_FTP_USERNAME)"
+        PKPANE_LIVE_FTP_PASSWORD: "$(PKPANE_LIVE_FTP_PASSWORD)"
+        PKPANE_LIVE_FTP_DIRECTORY: "$(PKPANE_LIVE_FTP_DIRECTORY)"
+        PKPANE_LIVE_FTP_SECURITY: "$(PKPANE_LIVE_FTP_SECURITY)"
+      coverageTargets:
+        - PKPane
+      targets:
+        - name: PKPaneTests
+          # 直列+ランダム順を正式運用とする(2026-09-08裁定)。注入化ウェーブで共有TransferQueueは
+          # 全テスト注入済みだが、プロセス内並列はMainActor拘束テストが大半のため直列55秒に対し
+          # 並列289秒と遅く、利得がない。並列へ戻す提案は同条件の計測結果を添えること。
+          parallelizable: false
+          randomExecutionOrder: true
+        - name: PKPaneSnapshotTests
+          parallelizable: false
+          randomExecutionOrder: false
+        - name: PKPaneUITests
+          parallelizable: false
+          randomExecutionOrder: false
