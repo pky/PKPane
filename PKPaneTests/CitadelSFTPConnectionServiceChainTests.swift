@@ -966,6 +966,237 @@ struct CitadelSFTPConnectionServiceChainTests {
   }
 }
 
+extension CitadelSFTPConnectionServiceChainTests {
+  private typealias AuthMethodsProber =
+    @Sendable (SSHClientSettings, (any SSHHopTransport)?) async -> SSHAuthMethodsProbeResult
+
+  @Test("U1: 保存パスワードが拒否され、対応方式が空ならダイアログもKeychainの変更もない")
+  func emptyProbedMethodsAfterStoredPasswordRejection() async throws {
+    let fixture = try makeFixture(
+      authenticationMode: .singleOfferPerDial,
+      authenticationFailures: ["files.example:22": [1]])
+    defer { fixture.cleanUp() }
+    let target = try SFTPConnectionTarget(host: "files.example", port: 22, username: "tester")
+    try fixture.passwordStore.save("stored", for: target.finalHop, kind: .password)
+    let events = fixture.events
+    events.withValue { $0.removeAll() }
+    let service = makeProbedService(fixture) { _, _ in
+      events.withValue { $0.append("probe") }
+      return .methods([])
+    }
+
+    let error = await capturedConnectionError {
+      _ = try await service.connect(to: target, intent: .userInitiated, hopProgress: nil)
+    }
+
+    #expect(error == .unsupportedAuthenticationMethods(target.finalHop))
+    #expect(await fixture.prompter.requests().isEmpty)
+    #expect(await fixture.recorder.offers(for: "files.example:22") == [.password])
+    #expect(events.value == ["dial:files.example:22", "probe"])
+    #expect(try fixture.passwordStore.secret(for: target.finalHop, kind: .password) == "stored")
+  }
+
+  @Test("U2: 保存資格情報がなく公開鍵のみ提示されたらダイアログなしで秘密鍵を求める")
+  func probedPublicKeyOnlyWithNoStoredCredentials() async throws {
+    let fixture = try makeFixture(authenticationMode: .singleOfferPerDial)
+    defer { fixture.cleanUp() }
+    let target = try SFTPConnectionTarget(host: "files.example", port: 22, username: "tester")
+    let service = makeProbedService(fixture) { _, _ in .methods([.publicKey]) }
+
+    let error = await capturedConnectionError {
+      _ = try await service.connect(to: target, intent: .userInitiated, hopProgress: nil)
+    }
+
+    #expect(error == .publicKeyAuthenticationRequired(target.finalHop))
+    #expect(await fixture.prompter.requests().isEmpty)
+    #expect(await fixture.recorder.connectedAddresses().isEmpty)
+  }
+
+  @Test("U3: パスワード認証が提示されたらダイアログを1回出す")
+  func probedPasswordPromptsOnce() async throws {
+    let fixture = try makeFixture(authenticationMode: .singleOfferPerDial)
+    defer { fixture.cleanUp() }
+    let target = try SFTPConnectionTarget(host: "files.example", port: 22, username: "tester")
+    let events = fixture.events
+    let service = makeProbedService(fixture) { _, _ in
+      events.withValue { $0.append("probe") }
+      return .methods([.password])
+    }
+
+    let error = await capturedConnectionError {
+      _ = try await service.connect(to: target, intent: .userInitiated, hopProgress: nil)
+    }
+
+    #expect(error == .authenticationCancelled)
+    #expect(await fixture.prompter.requests().map(\.attempt) == [1])
+    #expect(events.value == ["probe", "prompt:password"])
+  }
+
+  @Test("U4: 認証方式が不明ならダイアログを1回出す")
+  func unknownProbeResultPromptsOnce() async throws {
+    let fixture = try makeFixture(authenticationMode: .singleOfferPerDial)
+    defer { fixture.cleanUp() }
+    let target = try SFTPConnectionTarget(host: "files.example", port: 22, username: "tester")
+    let events = fixture.events
+    let service = makeProbedService(fixture) { _, _ in
+      events.withValue { $0.append("probe") }
+      return .unknown
+    }
+
+    let error = await capturedConnectionError {
+      _ = try await service.connect(to: target, intent: .userInitiated, hopProgress: nil)
+    }
+
+    #expect(error == .authenticationCancelled)
+    #expect(await fixture.prompter.requests().map(\.attempt) == [1])
+    #expect(events.value == ["probe", "prompt:password"])
+  }
+
+  @Test("U5: 秘密鍵または保存パスワードで認証できたらプローブを呼ばない", arguments: [true, false])
+  func successfulStoredAuthenticationDoesNotProbe(usePrivateKey: Bool) async throws {
+    let fixture = try makeFixture(authenticationMode: .singleOfferPerDial)
+    defer { fixture.cleanUp() }
+    let target = try SFTPConnectionTarget(host: "files.example", port: 22, username: "tester")
+    if usePrivateKey {
+      try fixture.privateKeys.save(URL(filePath: "/fixture/probe-key"), for: target.finalHop)
+    } else {
+      try fixture.passwordStore.save("stored", for: target.finalHop, kind: .password)
+    }
+    let probes = ChainLockedValue(0)
+    let service = makeProbedService(fixture) { _, _ in
+      probes.withValue { $0 += 1 }
+      return .methods([])
+    }
+
+    let session = try await service.connect(to: target, intent: .userInitiated, hopProgress: nil)
+    try await session.close()
+
+    let expectedOffer: ChainAuthenticationOfferKind = usePrivateKey ? .privateKey : .password
+    #expect(await fixture.recorder.offers(for: "files.example:22") == [expectedOffer])
+    #expect(probes.value == 0)
+    #expect(await fixture.prompter.requests().isEmpty)
+  }
+
+  @Test("U6: バックグラウンド接続ではプローブもダイアログもなく認証失敗を返す")
+  func backgroundAuthenticationFailureDoesNotProbe() async throws {
+    let fixture = try makeFixture(
+      authenticationMode: .singleOfferPerDial,
+      authenticationFailures: ["files.example:22": [1]])
+    defer { fixture.cleanUp() }
+    let target = try SFTPConnectionTarget(host: "files.example", port: 22, username: "tester")
+    try fixture.passwordStore.save("stored", for: target.finalHop, kind: .password)
+    let probes = ChainLockedValue(0)
+    let service = makeProbedService(fixture) { _, _ in
+      probes.withValue { $0 += 1 }
+      return .methods([])
+    }
+
+    let error = await capturedConnectionError {
+      _ = try await service.connect(to: target, intent: .background, hopProgress: nil)
+    }
+
+    #expect(error == .hopAuthenticationFailed(target.finalHop, reason: nil))
+    #expect(await fixture.recorder.offers(for: "files.example:22") == [.password])
+    #expect(probes.value == 0)
+    #expect(await fixture.prompter.requests().isEmpty)
+  }
+
+  @Test("U7: 2段目のプローブに接続先のホップと接続済みの踏み台を渡す")
+  func secondHopProbeReceivesDestinationAndPreviousTransport() async throws {
+    let fixture = try makeFixture(authenticationMode: .singleOfferPerDial)
+    defer { fixture.cleanUp() }
+    let jump = try SFTPJumpHost(host: "gateway", port: 2222, username: "ops", label: "踏み台")
+    let target = try SFTPConnectionTarget(
+      host: "destination.example", port: 2207, username: "destination-user", jumpHosts: [jump])
+    let relay = try #require(target.hops.first)
+    try fixture.passwordStore.save("relay-password", for: relay, kind: .password)
+    let calls = ChainLockedValue<[(SSHClientSettings, ObjectIdentifier?)]>([])
+    let service = makeProbedService(fixture) { settings, previous in
+      let identifier = (previous as? FakeSSHHopTransport).map(ObjectIdentifier.init)
+      calls.withValue { $0.append((settings, identifier)) }
+      return .methods([.password])
+    }
+
+    let error = await capturedConnectionError {
+      _ = try await service.connect(to: target, intent: .userInitiated, hopProgress: nil)
+    }
+
+    #expect(error == .authenticationCancelled)
+    #expect(await fixture.prompter.requests().map(\.hop) == [target.finalHop])
+    #expect(await fixture.recorder.connectedAddresses() == ["gateway:2222"])
+    let recordedCalls = calls.value
+    try #require(recordedCalls.count == 1)
+    let (settings, previousIdentifier) = try #require(recordedCalls.first)
+    #expect(settings.host == target.finalHop.host)
+    #expect(settings.port == target.finalHop.port)
+    #expect(try probeUsername(from: settings) == target.finalHop.username)
+    let relayIdentifier = try #require(await fixture.recorder.directTransportIdentifier())
+    #expect(previousIdentifier == relayIdentifier)
+  }
+
+  @Test("U8: 新しい認証エラーに接続先が入り、案内文言はエラーの説明と一致する")
+  func probeErrorsIncludeHostAndPortInGuidance() throws {
+    let hop = SFTPHopIdentity(host: "files.example", port: 2207, username: "tester")
+    let errors: [SFTPConnectionServiceError] = [
+      .unsupportedAuthenticationMethods(hop), .publicKeyAuthenticationRequired(hop),
+    ]
+
+    for error in errors {
+      let description = try #require(error.errorDescription)
+      #expect(description.contains("files.example:2207"))
+      #expect(ConnectionErrorClassifier.classify(error) == .authenticationFailed)
+      #expect(ConnectionErrorClassifier.guidanceMessage(for: error) == description)
+    }
+  }
+
+  @Test("U9: hopConnectorのみを注入した構成は認証方式が不明の場合と同様にダイアログを1回出す")
+  func injectedConnectorWithoutProberPromptsOnce() async throws {
+    let fixture = try makeFixture(authenticationMode: .singleOfferPerDial, keyLoader: nil)
+    defer { fixture.cleanUp() }
+    let target = try SFTPConnectionTarget(
+      host: "no-network.invalid", port: 2207, username: "tester")
+
+    let error = await capturedConnectionError {
+      _ = try await fixture.service.connect(to: target, intent: .userInitiated, hopProgress: nil)
+    }
+
+    #expect(error == .authenticationCancelled)
+    #expect(await fixture.prompter.requests().map(\.attempt) == [1])
+    #expect(await fixture.recorder.connectedAddresses().isEmpty)
+  }
+
+  private func makeProbedService(
+    _ fixture: ConnectionServiceFixture,
+    authMethodsProber: @escaping AuthMethodsProber
+  ) -> CitadelSFTPConnectionService {
+    CitadelSFTPConnectionService(
+      passwordStore: fixture.passwordStore,
+      privateKeyRepository: fixture.privateKeys,
+      hostKeyValidatorFactory: fixture.service.hostKeyValidatorFactory,
+      hopConnector: fixture.service.hopConnector,
+      authMethodsProber: authMethodsProber,
+      credentialPrompter: fixture.prompter,
+      credentialCache: fixture.credentialCache,
+      keyLoader: { _, _ in NIOSSHPrivateKey(ed25519Key: .init()) })
+  }
+
+  private func probeUsername(from settings: SSHClientSettings) throws -> String {
+    // SSHClientSettingsでは認証デリゲートの提示内容からユーザー名を確認する。
+    let eventLoop = EmbeddedEventLoop()
+    let promise = eventLoop.makePromise(of: NIOSSHUserAuthenticationOffer?.self)
+    let result = ChainLockedValue<Result<NIOSSHUserAuthenticationOffer?, Error>?>(nil)
+    promise.futureResult.whenComplete { completion in
+      result.withValue { $0 = completion }
+    }
+    settings.authenticationMethod().nextAuthenticationType(
+      availableMethods: [.publicKey, .password], nextChallengePromise: promise)
+    eventLoop.run()
+    let completion = try #require(result.value)
+    let offer = try #require(try completion.get())
+    return offer.username
+  }
+}
+
 private struct ConnectionServiceFixture {
   let service: CitadelSFTPConnectionService
   let passwordStore: SFTPPasswordStore
@@ -1056,7 +1287,11 @@ private final class FakeHopNetwork: @unchecked Sendable {
       throw SSHClientError.allAuthenticationOptionsFailed
     }
     events.withValue { $0.append("authenticated:\(address)") }
-    return FakeSSHHopTransport(address: address, network: self)
+    let transport = FakeSSHHopTransport(address: address, network: self)
+    if !isJump {
+      await recorder.recordDirectTransport(ObjectIdentifier(transport))
+    }
+    return transport
   }
 
   private func validate(settings: SSHClientSettings) throws {
@@ -1149,6 +1384,7 @@ private actor HopTransportRecorder {
   private var opened: [String] = []
   private var closed: [String] = []
   private var baseSessionCloseCount = 0
+  private var directTransport: ObjectIdentifier?
 
   func recordConnection(_ settings: SSHClientSettings, isJump: Bool) -> Int {
     let address = "\(settings.host):\(settings.port)"
@@ -1182,6 +1418,11 @@ private actor HopTransportRecorder {
     baseSessionCloseCount += 1
   }
 
+  func recordDirectTransport(_ identifier: ObjectIdentifier) {
+    directTransport = identifier
+  }
+
+  func directTransportIdentifier() -> ObjectIdentifier? { directTransport }
   func dialSettings() -> [SSHClientSettings] { settingsByHop }
   func connectedAddresses() -> [String] { connected }
   func directAddresses() -> [String] { direct }
@@ -1253,6 +1494,7 @@ private final class InMemoryChainKeychainPasswordDataStore: KeychainPasswordData
   }
 
   func remove(service _: String, account: String) throws {
+    events.withValue { $0.append("remove:\(account)") }
     entries.withValue { $0[account] = nil }
   }
 
