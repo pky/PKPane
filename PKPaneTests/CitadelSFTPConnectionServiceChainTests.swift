@@ -1165,6 +1165,67 @@ extension CitadelSFTPConnectionServiceChainTests {
     #expect(await fixture.recorder.connectedAddresses().isEmpty)
   }
 
+  @Test("U10: 設定済みの鍵が拒否されて公開鍵のみ提示されたらダイアログなしでホップ認証失敗を返す")
+  func rejectedConfiguredKeyWithPublicKeyOnlyReturnsHopAuthenticationFailure() async throws {
+    let fixture = try makeFixture(
+      authenticationMode: .singleOfferPerDial,
+      authenticationFailures: ["files.example:22": [1]])
+    defer { fixture.cleanUp() }
+    let target = try SFTPConnectionTarget(host: "files.example", port: 22, username: "tester")
+    try fixture.privateKeys.save(URL(filePath: "/fixture/probe-key"), for: target.finalHop)
+    let events = fixture.events
+    let service = makeProbedService(fixture) { _, _ in
+      events.withValue { $0.append("probe") }
+      return .methods([.publicKey])
+    }
+
+    let error = await capturedConnectionError {
+      _ = try await service.connect(to: target, intent: .userInitiated, hopProgress: nil)
+    }
+
+    #expect(error == .hopAuthenticationFailed(target.finalHop, reason: nil))
+    #expect(await fixture.prompter.requests().isEmpty)
+    #expect(await fixture.recorder.offers(for: "files.example:22") == [.privateKey])
+    #expect(events.value == ["dial:files.example:22", "probe"])
+  }
+
+  @Test("U11: 認証方式が不明でも未承認または変更されたホスト鍵のエラーを先に返す", arguments: [false, true])
+  func unknownProbeResultReturnsHostKeyError(hasTrustedKey: Bool) async throws {
+    let fixture = try makeFixture(authenticationMode: .singleOfferPerDial)
+    defer { fixture.cleanUp() }
+    let target = try SFTPConnectionTarget(host: "files.example", port: 2207, username: "tester")
+    if hasTrustedKey {
+      let trustedKey = NIOSSHPrivateKey(ed25519Key: .init()).publicKey
+      SFTPHostKeyTrustStore(defaults: fixture.defaults)
+        .trust(openSSHPublicKey: String(openSSHPublicKey: trustedKey), for: target)
+    }
+    let presentedPublicKey = ChainLockedValue<String?>(nil)
+    let service = makeProbedService(fixture) { settings, _ in
+      let hostKey = NIOSSHPrivateKey(ed25519Key: .init()).publicKey
+      presentedPublicKey.withValue { $0 = String(openSSHPublicKey: hostKey) }
+      let eventLoop = EmbeddedEventLoop()
+      let promise = eventLoop.makePromise(of: Void.self)
+      settings.hostKeyValidator.validateHostKey(
+        hostKey: hostKey, validationCompletePromise: promise)
+      eventLoop.run()
+      return .unknown
+    }
+
+    let error = await capturedConnectionError {
+      _ = try await service.connect(to: target, intent: .userInitiated, hopProgress: nil)
+    }
+
+    let request = SFTPHostKeyApprovalRequest(
+      host: target.finalHop.host,
+      port: target.finalHop.port,
+      publicKey: try #require(presentedPublicKey.value))
+    let expectedError: SFTPConnectionServiceError =
+      hasTrustedKey ? .hostKeyChanged(request) : .hostKeyRequiresApproval(request)
+    #expect(error == expectedError)
+    #expect(await fixture.prompter.requests().isEmpty)
+    #expect(await fixture.recorder.directAddresses().isEmpty)
+  }
+
   private func makeProbedService(
     _ fixture: ConnectionServiceFixture,
     authMethodsProber: @escaping AuthMethodsProber
