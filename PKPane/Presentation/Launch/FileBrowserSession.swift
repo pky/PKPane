@@ -2707,9 +2707,47 @@ final class FileBrowserSession {
   }
 
   func rename(_ item: FileItem, to name: String) {
-    perform(removingSearchResults: [item]) { operations in
+    guard !isLoading else { return }
+    var reloadLocation: FileLocation?
+    var onSuccess: (@MainActor (FileBrowserSession) -> Void)?
+    if item.isDirectory,
+      provider is any FileBrowserOperationProvider,
+      let childIndex = columnState.columns.firstIndex(where: { $0.location == item.location }),
+      childIndex > 0
+    {
+      // 改名で消えるパスを再列挙しないよう、対象を含む親カラムまで戻す。
+      let parentLocation = columnState.columns[childIndex - 1].location
+      selectColumnItemsForRename([], inColumnAt: parentLocation)
+      reloadLocation = parentLocation
+
+      let renamedName =
+        item.location.remotePath == nil
+        ? name : name.trimmingCharacters(in: .whitespacesAndNewlines)
+      onSuccess = { session in
+        guard session.columnState.columns.last?.location == parentLocation,
+          let renamedItem = session.items.first(where: { $0.isDirectory && $0.name == renamedName })
+        else { return }
+        // 同じ名前の別フォルダを以前開いていても、改名後の内容を新たに読み込む。
+        session.directoryCache[item.location] = nil
+        session.directoryCache[renamedItem.location] = nil
+        session.selectColumnItemsForRename([renamedItem.url], inColumnAt: parentLocation)
+      }
+    }
+    perform(removingSearchResults: [item], reloadingAt: reloadLocation, onSuccess: onSuccess) {
+      operations in
       try await operations.rename(item, to: name)
     }
+  }
+
+  /// 改名で右端を切り替えるときは、移動前の一覧更新を打ち切ってカラム選択を適用する。
+  private func selectColumnItemsForRename(
+    _ selectedURLs: Set<URL>, inColumnAt location: FileLocation
+  ) {
+    if isRefreshing {
+      loadTask?.cancel()
+      isRefreshing = false
+    }
+    selectColumnItems(selectedURLs, inColumnAt: location)
   }
 
   func batchRename(
@@ -5046,6 +5084,8 @@ final class FileBrowserSession {
 
   private func perform(
     removingSearchResults removedItems: [FileItem] = [],
+    reloadingAt location: FileLocation? = nil,
+    onSuccess: (@MainActor (FileBrowserSession) -> Void)? = nil,
     _ operation: @escaping @MainActor (any FileBrowserOperationProvider) async throws -> Void
   ) {
     guard !isLoading else { return }
@@ -5061,7 +5101,8 @@ final class FileBrowserSession {
       // 別フォルダへ移動しうる。currentLocationをawait後に読み直すと移動後のロケーションへ
       // 旧フォルダの列挙結果を書き込んでしまうため、冒頭で捕捉したdestinationだけを使い、
       // 権威的な書き込みの直前でcurrentLocationとの一致を確認する。
-      let destination = currentLocation
+      let destination = location ?? currentLocation
+      var didSucceed = false
       do {
         try await operation(operations)
         removeSearchResults(at: Set(removedItems.map(\.location)))
@@ -5080,6 +5121,7 @@ final class FileBrowserSession {
           items = loadedItems
         }
         errorMessage = nil
+        didSucceed = true
       } catch {
         presentError(error)
       }
@@ -5091,6 +5133,9 @@ final class FileBrowserSession {
       if currentLocation == destination {
         isLoading = false
         consumePendingWatcherEventIfNeeded()
+        if didSucceed {
+          onSuccess?(self)
+        }
       }
       purgeRetiredBrowsingSnapshot()
       notifyRetiredLifecycleDidBecomeIdle()
