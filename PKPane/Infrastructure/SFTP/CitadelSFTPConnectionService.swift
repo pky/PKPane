@@ -369,7 +369,12 @@ struct CitadelSFTPConnectionService: SFTPConnecting, @unchecked Sendable {
     }
 
     if case .userInitiated = intent {
-      try await checkPasswordAuthentication(for: hop, previous: previous, validation: validation)
+      try await checkPasswordAuthentication(
+        for: hop,
+        previous: previous,
+        validation: validation,
+        hasConfiguredPrivateKey: privateKeyURL != nil,
+        keyFailureReason: keyFailureReason)
       // 入力の繰り返しは未提示方式のサーバーで無駄に聞き直すだけなので1回で終える。
       Self.logAuthAttempt(hop: hop, method: "passwordPrompt(waitingDialog)")
       guard
@@ -401,7 +406,9 @@ struct CitadelSFTPConnectionService: SFTPConnecting, @unchecked Sendable {
   private func checkPasswordAuthentication(
     for hop: SFTPHopIdentity,
     previous: (any SSHHopTransport)?,
-    validation: SFTPHostKeyValidation
+    validation: SFTPHostKeyValidation,
+    hasConfiguredPrivateKey: Bool,
+    keyFailureReason: String?
   ) async throws {
     try Task.checkCancellation()
     let probe = SSHAuthMethodsProbe(username: hop.username)
@@ -423,10 +430,14 @@ struct CitadelSFTPConnectionService: SFTPConnecting, @unchecked Sendable {
       Self.logAuthResult(hop: hop, method: "methodsProbe", outcome: offered.joined(separator: ","))
       guard !methods.contains(.password) else { return }
       if methods.contains(.publicKey) {
+        if hasConfiguredPrivateKey {
+          throw SFTPConnectionServiceError.hopAuthenticationFailed(hop, reason: keyFailureReason)
+        }
         throw SFTPConnectionServiceError.publicKeyAuthenticationRequired(hop)
       }
       throw SFTPConnectionServiceError.unsupportedAuthenticationMethods(hop)
     case .unknown:
+      Self.logAuthResult(hop: hop, method: "methodsProbe", outcome: "unknown")
       if let hostKeyError = Self.hostKeyError(
         capturedPublicKey: validation.capture.publicKey,
         trustedPublicKey: validation.trustedPublicKey,
