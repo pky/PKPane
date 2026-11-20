@@ -18,6 +18,8 @@ enum SFTPConnectionServiceError: LocalizedError, Equatable, ReconnectFutileError
   case hostKeyRequiresApproval(SFTPHostKeyApprovalRequest)
   case hostKeyChanged(SFTPHostKeyApprovalRequest)
   case hopAuthenticationFailed(SFTPHopIdentity, reason: String?)
+  case unsupportedAuthenticationMethods(SFTPHopIdentity)
+  case publicKeyAuthenticationRequired(SFTPHopIdentity)
   case authenticationCancelled
 
   // 既存のフェイクが公開鍵文字列だけでエラーを組み立てる経路を保つ。
@@ -49,6 +51,18 @@ enum SFTPConnectionServiceError: LocalizedError, Equatable, ReconnectFutileError
           localized:
             "%@:%ld の認証に失敗しました。パスワードが誤っているか、サーバーが password 認証を受け付けていません。"),
         hop.host, hop.port)
+    case .unsupportedAuthenticationMethods(let hop):
+      String(
+        format: String(
+          localized:
+            "%@:%ld は PKPane が対応していない認証方式(keyboard-interactive など)だけを受け付けています。サーバー側で password 認証か公開鍵認証を有効にしてください。"
+        ),
+        hop.host, hop.port)
+    case .publicKeyAuthenticationRequired(let hop):
+      String(
+        format: String(
+          localized: "%@:%ld は公開鍵認証だけを受け付けています。接続設定で秘密鍵を指定してください。"),
+        hop.host, hop.port)
     case .authenticationCancelled:
       String(localized: "SFTP接続の認証をキャンセルしました。")
     }
@@ -62,6 +76,8 @@ enum SFTPConnectionServiceError: LocalizedError, Equatable, ReconnectFutileError
     case .hostKeyRequiresApproval: "hostKeyRequiresApproval"
     case .hostKeyChanged: "hostKeyChanged"
     case .hopAuthenticationFailed: "hopAuthenticationFailed"
+    case .unsupportedAuthenticationMethods: "unsupportedAuthenticationMethods"
+    case .publicKeyAuthenticationRequired: "publicKeyAuthenticationRequired"
     case .authenticationCancelled: "authenticationCancelled"
     }
   }
@@ -110,6 +126,7 @@ struct CitadelSFTPConnectionService: SFTPConnecting, @unchecked Sendable {
   let hopConnector: SSHHopConnector
   let credentialPrompter: any SFTPCredentialPrompting
   let credentialCache: SFTPSessionCredentialCache
+  private let authMethodsProber: SSHAuthMethodsProber?
   private let rejectionLedger = SFTPRejectionLedger()
   private let keyLoader: @Sendable (URL, String?) throws -> NIOSSHPrivateKey
   private let usesInjectedKeyLoader: Bool
@@ -119,9 +136,8 @@ struct CitadelSFTPConnectionService: SFTPConnecting, @unchecked Sendable {
     privateKeyRepository: any SFTPPrivateKeyBookmarkPersisting = SFTPPrivateKeyBookmarkRepository(),
     hostKeyValidatorFactory: CitadelSFTPHostKeyValidatorFactory =
       CitadelSFTPHostKeyValidatorFactory(trustStore: SFTPHostKeyTrustStore()),
-    hopConnector: @escaping SSHHopConnector = { settings in
-      CitadelSSHHopTransport(client: try await SSHClient.connect(to: settings))
-    },
+    hopConnector: SSHHopConnector? = nil,
+    authMethodsProber: SSHAuthMethodsProber? = nil,
     credentialPrompter: any SFTPCredentialPrompting = SFTPNoPromptCredentialPrompter(),
     credentialCache: SFTPSessionCredentialCache = SFTPSessionCredentialCache()
   ) {
@@ -130,6 +146,7 @@ struct CitadelSFTPConnectionService: SFTPConnecting, @unchecked Sendable {
       privateKeyRepository: privateKeyRepository,
       hostKeyValidatorFactory: hostKeyValidatorFactory,
       hopConnector: hopConnector,
+      authMethodsProber: authMethodsProber,
       credentialPrompter: credentialPrompter,
       credentialCache: credentialCache,
       keyLoader: Self.defaultKeyLoader,
@@ -141,9 +158,8 @@ struct CitadelSFTPConnectionService: SFTPConnecting, @unchecked Sendable {
     privateKeyRepository: any SFTPPrivateKeyBookmarkPersisting = SFTPPrivateKeyBookmarkRepository(),
     hostKeyValidatorFactory: CitadelSFTPHostKeyValidatorFactory =
       CitadelSFTPHostKeyValidatorFactory(trustStore: SFTPHostKeyTrustStore()),
-    hopConnector: @escaping SSHHopConnector = { settings in
-      CitadelSSHHopTransport(client: try await SSHClient.connect(to: settings))
-    },
+    hopConnector: SSHHopConnector? = nil,
+    authMethodsProber: SSHAuthMethodsProber? = nil,
     credentialPrompter: any SFTPCredentialPrompting = SFTPNoPromptCredentialPrompter(),
     credentialCache: SFTPSessionCredentialCache = SFTPSessionCredentialCache(),
     keyLoader: @escaping @Sendable (URL, String?) throws -> NIOSSHPrivateKey
@@ -153,6 +169,7 @@ struct CitadelSFTPConnectionService: SFTPConnecting, @unchecked Sendable {
       privateKeyRepository: privateKeyRepository,
       hostKeyValidatorFactory: hostKeyValidatorFactory,
       hopConnector: hopConnector,
+      authMethodsProber: authMethodsProber,
       credentialPrompter: credentialPrompter,
       credentialCache: credentialCache,
       keyLoader: keyLoader,
@@ -163,7 +180,8 @@ struct CitadelSFTPConnectionService: SFTPConnecting, @unchecked Sendable {
     passwordStore: SFTPPasswordStore,
     privateKeyRepository: any SFTPPrivateKeyBookmarkPersisting,
     hostKeyValidatorFactory: CitadelSFTPHostKeyValidatorFactory,
-    hopConnector: @escaping SSHHopConnector,
+    hopConnector: SSHHopConnector?,
+    authMethodsProber: SSHAuthMethodsProber?,
     credentialPrompter: any SFTPCredentialPrompting,
     credentialCache: SFTPSessionCredentialCache,
     keyLoader: @escaping @Sendable (URL, String?) throws -> NIOSSHPrivateKey,
@@ -172,7 +190,18 @@ struct CitadelSFTPConnectionService: SFTPConnecting, @unchecked Sendable {
     self.passwordStore = passwordStore
     self.privateKeyRepository = privateKeyRepository
     self.hostKeyValidatorFactory = hostKeyValidatorFactory
-    self.hopConnector = hopConnector
+    self.hopConnector =
+      hopConnector ?? { settings in
+        CitadelSSHHopTransport(client: try await SSHClient.connect(to: settings))
+      }
+    // 接続だけを差し替えた構成では、確認接続も実ネットワークへ出さない。
+    if let authMethodsProber {
+      self.authMethodsProber = authMethodsProber
+    } else if hopConnector != nil {
+      self.authMethodsProber = { _, _ in .unknown }
+    } else {
+      self.authMethodsProber = nil
+    }
     self.credentialPrompter = credentialPrompter
     self.credentialCache = credentialCache
     self.keyLoader = keyLoader
@@ -340,6 +369,7 @@ struct CitadelSFTPConnectionService: SFTPConnecting, @unchecked Sendable {
     }
 
     if case .userInitiated = intent {
+      try await checkPasswordAuthentication(for: hop, previous: previous, validation: validation)
       // 入力の繰り返しは未提示方式のサーバーで無駄に聞き直すだけなので1回で終える。
       Self.logAuthAttempt(hop: hop, method: "passwordPrompt(waitingDialog)")
       guard
@@ -366,6 +396,45 @@ struct CitadelSFTPConnectionService: SFTPConnecting, @unchecked Sendable {
     }
 
     throw SFTPConnectionServiceError.hopAuthenticationFailed(hop, reason: keyFailureReason)
+  }
+
+  private func checkPasswordAuthentication(
+    for hop: SFTPHopIdentity,
+    previous: (any SSHHopTransport)?,
+    validation: SFTPHostKeyValidation
+  ) async throws {
+    try Task.checkCancellation()
+    let probe = SSHAuthMethodsProbe(username: hop.username)
+    let probeSettings = settings(for: hop, authentication: .probe(probe), validation: validation)
+    let result =
+      if let authMethodsProber {
+        await authMethodsProber(probeSettings, previous)
+      } else {
+        await probe.run(settings: probeSettings, previous: previous)
+      }
+    try Task.checkCancellation()
+
+    switch result {
+    case .methods(let methods):
+      let names: [(NIOSSHAvailableUserAuthenticationMethods, String)] = [
+        (.password, "password"), (.publicKey, "publickey"), (.hostBased, "hostbased"),
+      ]
+      let offered = names.compactMap { methods.contains($0.0) ? $0.1 : nil }
+      Self.logAuthResult(hop: hop, method: "methodsProbe", outcome: offered.joined(separator: ","))
+      guard !methods.contains(.password) else { return }
+      if methods.contains(.publicKey) {
+        throw SFTPConnectionServiceError.publicKeyAuthenticationRequired(hop)
+      }
+      throw SFTPConnectionServiceError.unsupportedAuthenticationMethods(hop)
+    case .unknown:
+      if let hostKeyError = Self.hostKeyError(
+        capturedPublicKey: validation.capture.publicKey,
+        trustedPublicKey: validation.trustedPublicKey,
+        host: hop.host, port: hop.port)
+      {
+        throw hostKeyError
+      }
+    }
   }
 
   private func preparePrivateKey(
@@ -714,6 +783,7 @@ private enum LoadedPrivateKey: @unchecked Sendable {
 private enum PreparedAuthentication: @unchecked Sendable {
   case password(username: String, secret: String)
   case privateKey(username: String, key: LoadedPrivateKey)
+  case probe(SSHAuthMethodsProbe)
 
   func makeMethod() -> SSHAuthenticationMethod {
     switch self {
@@ -721,6 +791,8 @@ private enum PreparedAuthentication: @unchecked Sendable {
       .passwordBased(username: username, password: secret)
     case .privateKey(let username, let key):
       key.authenticationMethod(username: username)
+    case .probe(let probe):
+      .custom(probe)
     }
   }
 }

@@ -327,6 +327,8 @@
 "%@:%ldはパスワード認証に対応していません。" = "%@:%ld does not support password authentication.";
 "認証に失敗しました" = "Authentication failed";
 "%@:%ld の認証に失敗しました。パスワードが誤っているか、サーバーが password 認証を受け付けていません。" = "Authentication to %@:%ld failed. The password may be wrong, or the server does not accept password authentication.";
+"%@:%ld は PKPane が対応していない認証方式(keyboard-interactive など)だけを受け付けています。サーバー側で password 認証か公開鍵認証を有効にしてください。" = "%@:%ld only accepts authentication methods that PKPane does not support, such as keyboard-interactive. Enable password or public key authentication on the server.";
+"%@:%ld は公開鍵認証だけを受け付けています。接続設定で秘密鍵を指定してください。" = "%@:%ld only accepts public key authentication. Select a private key in the connection settings.";
 
 "タグ…" = "Tags…";
 
