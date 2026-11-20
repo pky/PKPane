@@ -92,20 +92,21 @@ struct SFTPAuthMatrixWireTests {
   }
 
   @Test(
-    "T7 publickey-only: 保存パスワードは消さず、ダイアログ1回で hopAuthenticationFailed で終わる",
+    "T7 publickey-only: 保存パスワードを維持し、ダイアログなしで publicKeyAuthenticationRequired を返す",
     .enabled(if: sftpAuthMatrixEnabled))
   func t7PublicKeyOnlyWithoutKey() async throws {
     let env = try await makeEnvironment(
       server: "publickey-only", storedPassword: .correct,
       fallback: SFTPCredentialAnswer(secret: try configurationPassword(), saveToKeychain: false))
     defer { env.cleanUp() }
-    await expectHopAuthenticationFailed(env)
-    #expect(env.prompter.requests.count == 1)
+    let error = await connectExpectingFailure(env) as? SFTPConnectionServiceError
+    #expect(error == .publicKeyAuthenticationRequired(env.target.finalHop))
+    #expect(env.prompter.requests.isEmpty)
     #expect(env.keychain.events.isEmpty)
   }
 
   @Test(
-    "T8 keyboard-interactive-only: 保存パスワードは消さず、ダイアログ1回で hopAuthenticationFailed で終わる",
+    "T8 keyboard-interactive-only: 保存パスワードを維持し、ダイアログなしで unsupportedAuthenticationMethods を返す",
     .enabled(if: sftpAuthMatrixEnabled)
   )
   func t8KeyboardInteractiveOnly() async throws {
@@ -113,21 +114,23 @@ struct SFTPAuthMatrixWireTests {
       server: "keyboard-interactive-only", storedPassword: .correct,
       fallback: SFTPCredentialAnswer(secret: try configurationPassword(), saveToKeychain: false))
     defer { env.cleanUp() }
-    await expectHopAuthenticationFailed(env)
-    #expect(env.prompter.requests.count == 1)
+    let error = await connectExpectingFailure(env) as? SFTPConnectionServiceError
+    #expect(error == .unsupportedAuthenticationMethods(env.target.finalHop))
+    #expect(env.prompter.requests.isEmpty)
     #expect(env.keychain.events.isEmpty)
   }
 
   @Test(
-    "T13 publickey-only: 保存なしで入力したパスワードも1回で hopAuthenticationFailed になり保存されない",
+    "T13 publickey-only: パスワード未保存ならダイアログなしで publicKeyAuthenticationRequired を返す",
     .enabled(if: sftpAuthMatrixEnabled))
-  func t13PublicKeyOnlyWithPromptedPassword() async throws {
+  func t13PublicKeyOnlyWithoutStoredPassword() async throws {
     let env = try await makeEnvironment(
       server: "publickey-only", storedPassword: .none,
       fallback: SFTPCredentialAnswer(secret: try configurationPassword(), saveToKeychain: true))
     defer { env.cleanUp() }
-    await expectHopAuthenticationFailed(env)
-    #expect(env.prompter.requests.count == 1)
+    let error = await connectExpectingFailure(env) as? SFTPConnectionServiceError
+    #expect(error == .publicKeyAuthenticationRequired(env.target.finalHop))
+    #expect(env.prompter.requests.isEmpty)
     #expect(env.keychain.events.isEmpty)
   }
 

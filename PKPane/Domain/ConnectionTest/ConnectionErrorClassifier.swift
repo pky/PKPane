@@ -24,7 +24,8 @@ enum ConnectionErrorClassifier {
       switch sftpError {
       case .hostKeyRequiresApproval, .hostKeyChanged:
         return .hostKeyMismatch
-      case .passwordNotFound, .hopAuthenticationFailed, .authenticationCancelled:
+      case .passwordNotFound, .hopAuthenticationFailed, .unsupportedAuthenticationMethods,
+        .publicKeyAuthenticationRequired, .authenticationCancelled:
         return .authenticationFailed
       case .privateKeyNotFound, .unsupportedPrivateKey:
         return .other
@@ -61,7 +62,7 @@ enum ConnectionErrorClassifier {
   /// 誘導文言(SFTPConnectionServiceErrorのerrorDescription)をそのまま使い、既存フローを
   /// 変えない。それ以外は分類済みの定型文、otherは元のエラーメッセージへ再試行の案内を付け足す。
   static func guidanceMessage(for error: Error) -> String {
-    if isHopAuthenticationFailed(error) {
+    if hasHopAuthenticationGuidance(error) {
       return SecretMasker.maskForDisplay(error.localizedDescription)
     }
     return switch classify(error) {
@@ -78,10 +79,15 @@ enum ConnectionErrorClassifier {
     }
   }
 
-  private static func isHopAuthenticationFailed(_ error: Error) -> Bool {
+  private static func hasHopAuthenticationGuidance(_ error: Error) -> Bool {
     let underlying = (error as? SFTPHopConnectionError)?.underlying ?? error
-    if case SFTPConnectionServiceError.hopAuthenticationFailed = underlying { return true }
-    return false
+    switch underlying as? SFTPConnectionServiceError {
+    case .hopAuthenticationFailed, .unsupportedAuthenticationMethods,
+      .publicKeyAuthenticationRequired:
+      return true
+    default:
+      return false
+    }
   }
 
   private static func classify(posixStatus status: Int32) -> ConnectionFailureCategory {

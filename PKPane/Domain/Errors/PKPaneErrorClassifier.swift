@@ -111,7 +111,8 @@ enum PKPaneErrorClassifier {
         return preserving(error, as: .hostKeyUnknown)
       case .hostKeyChanged:
         return preserving(error, as: .hostKeyChanged)
-      case .hopAuthenticationFailed:
+      case .hopAuthenticationFailed, .unsupportedAuthenticationMethods,
+        .publicKeyAuthenticationRequired:
         return preserving(error, as: .authenticationFailed)
       case .authenticationCancelled:
         return preserving(error, as: .cancelled)
