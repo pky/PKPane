@@ -35,6 +35,15 @@ enum LocalSameVolumeTransfer {
   }
 }
 
+enum TransferQuietJobPolicy {
+  static func isLocalSameVolumeMove(_ job: TransferJob) -> Bool {
+    guard job.kind == .move, !job.items.isEmpty else { return false }
+    return job.items.allSatisfy {
+      LocalSameVolumeTransfer.canMove($0.fileItem, toDirectory: job.destination)
+    }
+  }
+}
+
 /// stagingや削除より前に、元と宛先の実体関係をローカル全経路で確認する。
 enum LocalTransferLocationValidator {
   enum Relation: Equatable {
