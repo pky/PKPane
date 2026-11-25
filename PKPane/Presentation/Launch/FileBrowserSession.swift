@@ -256,6 +256,7 @@ final class FileBrowserSession {
   /// テストでは短い値を注入し、実時間のTask.sleep(TransferQueue側)に依存せず検証する。
   private let autoReconnectBackoff: [Duration]
   let transferQueue: TransferQueue
+  private let localSameVolumeMoveCheck: @Sendable (TransferJob) async -> Bool
   private let archiveService: ArchiveService
   private let remoteArchiveService: RemoteArchiveService
   private let providerSearchServiceFactory: ProviderSearchServiceFactory
@@ -476,7 +477,12 @@ final class FileBrowserSession {
     gitStatusProvider: any GitStatusProviding = GitStatusService(),
     directoryCacheLimit: Int = DirectorySnapshotCachePolicy.directoryLimit,
     startsBrowsing: Bool = true,
-    workspaceBookmarkAccessLease: WorkspaceBookmarkAccessLease? = nil
+    workspaceBookmarkAccessLease: WorkspaceBookmarkAccessLease? = nil,
+    localSameVolumeMoveCheck: @escaping @Sendable (TransferJob) async -> Bool = { job in
+      await Task.detached {
+        TransferQuietJobPolicy.isLocalSameVolumeMove(job)
+      }.value
+    }
   ) {
     self.provider = provider
     currentLocation = initialLocation
@@ -485,6 +491,7 @@ final class FileBrowserSession {
     self.navigationBoundary = navigationBoundary
     self.hasExternalParent = hasExternalParent
     self.transferQueue = transferQueue
+    self.localSameVolumeMoveCheck = localSameVolumeMoveCheck
     self.archiveService = archiveService
     self.remoteArchiveService = remoteArchiveService
     self.autoReconnectBackoff = autoReconnectBackoff
@@ -5290,7 +5297,7 @@ final class FileBrowserSession {
     // と同じmakeAutoRetryPlannerを登録し、TransferQueueが失敗を検知したら自動的に
     // バックオフ・再試行してくれるようにする。
     let autoRetryPlanner = makeAutoRetryPlanner(pending: pending, jobID: job.id)
-    Task { [weak self, transferQueue, job] in
+    Task { [weak self, transferQueue, job, localSameVolumeMoveCheck] in
       let sizeAggregation = Task {
         await Self.transferSizes(
           of: items, using: sourceProvider,
@@ -5311,14 +5318,16 @@ final class FileBrowserSession {
           try await transferQueue.recordReservedDestinationName(
             name, for: location, jobID: reservedJobID)
         })
-      var queuedJob = job
-      if job.kind == .move {
-        queuedJob.isLocalSameVolumeMove = await Task.detached {
-          TransferQuietJobPolicy.isLocalSameVolumeMove(job)
-        }.value
-      }
       _ = await transferQueue.enqueue(
-        queuedJob, execution: execution, autoRetryPlanner: autoRetryPlanner)
+        job, execution: execution, autoRetryPlanner: autoRetryPlanner)
+      // ボリューム照会の完了を待たず、サイズ集計の反映と転送状態の更新を続ける。
+      if job.kind == .move {
+        Task {
+          if await localSameVolumeMoveCheck(job) {
+            await transferQueue.markLocalSameVolumeMove(job.id)
+          }
+        }
+      }
       await transferQueue.applyAggregatedTotalBytes(
         job.id, totalBytes: sizeAggregation.value.total)
       guard let self else { return }

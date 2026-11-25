@@ -614,6 +614,14 @@ actor TransferQueue {
     return job.completedItems
   }
 
+  /// 表示の判定結果を反映し、終了行の表示時間に使う updatedAt は保持する。
+  func markLocalSameVolumeMove(_ id: UUID) {
+    guard let index = jobs.firstIndex(where: { $0.id == id }), !jobs[index].isLocalSameVolumeMove
+    else { return }
+    jobs[index].isLocalSameVolumeMove = true
+    persistAndPublish()
+  }
+
   /// 並行実行される事前サイズ集計の結果を、遅れて到着した時点でジョブへ反映する。
   /// terminal状態(failed後のretainFailedItemsが再計算したtotalBytesなど)へ
   /// 遅延到着した値が上書きするrace防止のため、実行可能な非終端状態のみ許可する。

@@ -28,7 +28,6 @@ final class TransferActivityModel {
   private var dismissedJobIDs: Set<UUID> = []
   private var scheduledExpiryJobIDs: Set<UUID> = []
   @ObservationIgnored private var updateTask: Task<Void, Never>?
-  @ObservationIgnored private var quietJobsByID: [UUID: Bool] = [:]
   @ObservationIgnored private var latestSnapshot:
     (jobs: [TransferJob], pauseRequestedIDs: Set<UUID>) =
       ([], [])
@@ -156,7 +155,7 @@ final class TransferActivityModel {
         guard now.timeIntervalSince(job.updatedAt) < terminalDuration else { return false }
         if job.state != .completed { return true }
       }
-      guard !isQuiet(job) else { return false }
+      guard !isQuietJob(job) else { return false }
       if job.state == .completed {
         return job.updatedAt.timeIntervalSince(job.createdAt) >= delay
       }
@@ -177,13 +176,6 @@ final class TransferActivityModel {
       scheduleAutoDismissIfNeeded(for: job)
     }
     scheduleDisplayReevaluation(at: nextDisplayAt)
-  }
-
-  private func isQuiet(_ job: TransferJob) -> Bool {
-    if let wasQuiet = quietJobsByID[job.id] { return wasQuiet }
-    let quiet = isQuietJob(job)
-    quietJobsByID[job.id] = quiet
-    return quiet
   }
 
   private func scheduleDisplayReevaluation(at date: Date?) {
