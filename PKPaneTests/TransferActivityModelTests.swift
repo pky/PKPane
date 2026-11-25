@@ -309,208 +309,8 @@ struct TransferActivityModelTests {
     }
   }
 
-  @Test("静かなジョブは表示遅延を過ぎても隠し、失敗したら表示する")
-  func hidesQuietRunningJobAndShowsItsFailure() async throws {
-    let queue = TransferQueue(store: InMemoryTransferJobStore())
-    let delay: Duration = .milliseconds(300)
-    let quietJob = makeJob()
-    let model = makeDelayedModel(
-      transferQueue: queue, minimumDisplayDelay: delay, isQuietJob: { $0.id == quietJob.id })
-    let gate = AsyncStream<Void>.makeStream()
-    defer { gate.continuation.finish() }
-
-    _ = await queue.enqueue(quietJob) { _, _ in
-      for await _ in gate.stream { break }
-      throw CocoaError(.fileWriteUnknown)
-    }
-    try await expectJobToStayHidden(quietJob, in: model, for: delay + .milliseconds(150))
-    let jobs = await queue.allJobs()
-    #expect(jobs.first(where: { $0.id == quietJob.id })?.state == .running)
-
-    gate.continuation.finish()
-    try await waitUntil {
-      model.activeJobs.contains { $0.id == quietJob.id && $0.state == .failed }
-    }
-  }
-
-  @Test("同一ボリューム移動の記録をキューの購読者へ通知し、未知のIDは無視する")
-  func queuePublishesLocalSameVolumeMoveFlagForExistingJob() async throws {
-    let store = InMemoryTransferJobStore()
-    var job = makeLocalTransferJob(
-      .move, items: [FileItem(url: URL(filePath: "/source/report.txt"), isDirectory: false)],
-      destination: FileLocation(localURL: URL(filePath: "/destination")))
-    job.state = .completed
-    try store.save([job])
-    let queue = TransferQueue(store: store)
-    let updates = await queue.updates()
-    var snapshots: [[TransferJob]] = []
-    let observation = Task { @MainActor in
-      for await snapshot in updates {
-        snapshots.append(snapshot)
-        if snapshots.count == 2 { break }
-      }
-    }
-    defer { observation.cancel() }
-
-    await queue.markLocalSameVolumeMove(UUID())
-    #expect(await queue.allJobs() == [job])
-
-    await queue.markLocalSameVolumeMove(job.id)
-    let markedJob = try #require(await queue.allJobs().first)
-    #expect(markedJob.id == job.id)
-    #expect(markedJob.isLocalSameVolumeMove)
-    #expect(markedJob.state == .completed)
-    try await waitUntil { snapshots.count == 2 }
-    #expect(snapshots.first == [job])
-    // 未知のIDで通知した場合、実際にフラグを立てる前の一覧が2件目に届く。
-    #expect(snapshots.dropFirst().first == [markedJob])
-  }
-
-  @Test("記録が表示遅延より前なら移動を隠し、表示後なら一覧から消す", arguments: [true, false])
-  func hidesRunningMoveWhenFlagArrivesBeforeOrAfterDisplay(markBeforeDelay: Bool) async throws {
-    let queue = TransferQueue(store: InMemoryTransferJobStore())
-    let delay: Duration = .milliseconds(300)
-    let model = makeDelayedModel(
-      transferQueue: queue, minimumDisplayDelay: delay, isQuietJob: { $0.isLocalSameVolumeMove })
-    let gate = AsyncStream<Void>.makeStream()
-    defer { gate.continuation.finish() }
-    let job = makeLocalTransferJob(
-      .move, items: [FileItem(url: URL(filePath: "/source/report.txt"), isDirectory: false)],
-      destination: FileLocation(localURL: URL(filePath: "/destination")))
-
-    _ = await queue.enqueue(job) { _, _ in
-      for await _ in gate.stream { break }
-    }
-    let earlyObservation: Duration = .milliseconds(100)
-    if markBeforeDelay {
-      try await expectJobToStayHidden(job, in: model, for: earlyObservation)
-    } else {
-      try await waitUntil {
-        model.activeJobs.contains { $0.id == job.id && $0.state == .running }
-      }
-    }
-
-    let runningJob = try #require(await queue.allJobs().first)
-    #expect(runningJob.state == .running)
-    #expect(!runningJob.isLocalSameVolumeMove)
-    if markBeforeDelay {
-      #expect(Duration.seconds(Date.now.timeIntervalSince(job.createdAt)) < delay)
-    }
-    await queue.markLocalSameVolumeMove(job.id)
-
-    if markBeforeDelay {
-      try await expectJobToStayHidden(
-        job, in: model, for: delay + .milliseconds(150) - earlyObservation)
-    } else {
-      try await waitUntil { !model.activeJobs.contains { $0.id == job.id } }
-    }
-    #expect(await queue.allJobs().first?.state == .running)
-  }
-
-  @Test("静かなジョブの判定は項目のある同一ボリューム内のローカル移動に限る")
-  func quietPolicyRequiresNonemptyAllLocalSameVolumeMove() async throws {
-    try await withLocalTransferFiles { item, destination in
-      let remote = FileItem(
-        remotePath: "/source/remote.txt", url: URL(filePath: "/remote.txt"),
-        providerID: FileProviderID(rawValue: "test-remote"), isDirectory: false)
-      let move = makeLocalTransferJob(.move, items: [item], destination: destination)
-      let copy = makeLocalTransferJob(.copy, items: [item], destination: destination)
-      let mixedMove = makeLocalTransferJob(.move, items: [item, remote], destination: destination)
-      let emptyMove = makeLocalTransferJob(.move, items: [], destination: destination)
-
-      #expect(TransferQuietJobPolicy.isLocalSameVolumeMove(move))
-      #expect(!TransferQuietJobPolicy.isLocalSameVolumeMove(copy))
-      #expect(!TransferQuietJobPolicy.isLocalSameVolumeMove(mixedMove))
-      #expect(!TransferQuietJobPolicy.isLocalSameVolumeMove(emptyMove))
-    }
-  }
-
-  @Test("移動元ファイルが移動済みでも同一ボリューム内のローカル移動と判定する")
-  func quietPolicyRecognizesLocalMoveAfterSourceHasMoved() async throws {
-    try await withLocalTransferFiles { item, destination in
-      let sourceURL = try #require(item.location.localURL)
-      let destinationURL = try #require(destination.localURL)
-      try FileManager.default.moveItem(
-        at: sourceURL, to: destinationURL.appendingPathComponent(item.name))
-      let move = makeLocalTransferJob(.move, items: [item], destination: destination)
-
-      #expect(TransferQuietJobPolicy.isLocalSameVolumeMove(move))
-    }
-  }
-
-  @Test("同じ親フォルダからの2万件のローカル移動を0.1秒未満で判定する")
-  func quietPolicyRecognizesTwentyThousandItemsFromOneDirectoryWithinBudget() async throws {
-    try await withLocalTransferFiles { item, destination in
-      let sourceURL = try #require(item.location.localURL)
-      let sourceDirectory = sourceURL.deletingLastPathComponent()
-      let items = (0..<20_000).map { index in
-        FileItem(
-          url: sourceDirectory.appendingPathComponent("item-\(index).txt"), isDirectory: false)
-      }
-      let move = makeLocalTransferJob(.move, items: items, destination: destination)
-
-      let clock = ContinuousClock()
-      let startedAt = clock.now
-      let isLocalMove = TransferQuietJobPolicy.isLocalSameVolumeMove(move)
-      let elapsed = startedAt.duration(to: clock.now)
-
-      #expect(isLocalMove)
-      #expect(elapsed < Duration.milliseconds(100))
-    }
-  }
-
-  @Test("マウントポイントは自身、通常ファイルは親フォルダのボリュームで判定する")
-  func quietPolicyQueriesMountPointAndRegularFileParent() {
-    let destination = FileLocation(localURL: URL(filePath: "/destination"))
-    let mountPoint = FileItem(url: URL(filePath: "/Volumes/External"), isDirectory: true)
-    let regularFile = FileItem(url: URL(filePath: "/Volumes/report.txt"), isDirectory: false)
-    let volumeIdentifiers = [
-      "/destination": "internal",
-      "/Volumes": "internal",
-      "/Volumes/External": "external",
-    ]
-    var queriedPaths: Set<String> = []
-    let volumeIdentifier: (URL) -> String? = { url in
-      queriedPaths.insert(url.path)
-      return volumeIdentifiers[url.path]
-    }
-
-    let directoryMove = makeLocalTransferJob(.move, items: [mountPoint], destination: destination)
-    #expect(
-      !TransferQuietJobPolicy.isLocalSameVolumeMove(
-        directoryMove, volumeIdentifier: volumeIdentifier))
-    #expect(queriedPaths.contains("/Volumes/External"))
-
-    queriedPaths.removeAll()
-    let fileMove = makeLocalTransferJob(.move, items: [regularFile], destination: destination)
-    #expect(
-      TransferQuietJobPolicy.isLocalSameVolumeMove(
-        fileMove, volumeIdentifier: volumeIdentifier))
-    #expect(queriedPaths == ["/destination", "/Volumes"])
-  }
-
-  @Test("同一ボリューム移動の記録はJSONに保存され、旧形式ではfalseになる")
-  func roundTripsLocalSameVolumeMoveFlagAndDefaultsLegacyJSONToFalse() throws {
-    var job = makeLocalTransferJob(
-      .move, items: [FileItem(url: URL(filePath: "/source/report.txt"), isDirectory: false)],
-      destination: FileLocation(localURL: URL(filePath: "/destination")))
-    #expect(!job.isLocalSameVolumeMove)
-    job.isLocalSameVolumeMove = true
-
-    let encoded = try JSONEncoder().encode(job)
-    let decoded = try JSONDecoder().decode(TransferJob.self, from: encoded)
-    #expect(decoded.isLocalSameVolumeMove)
-
-    let json = try JSONSerialization.jsonObject(with: encoded)
-    var legacy = try #require(json as? [String: Any])
-    legacy.removeValue(forKey: "isLocalSameVolumeMove")
-    let legacyData = try JSONSerialization.data(withJSONObject: legacy)
-    let legacyJob = try JSONDecoder().decode(TransferJob.self, from: legacyData)
-    #expect(!legacyJob.isLocalSameVolumeMove)
-  }
-
-  @Test("ブラウザ用モデルは同一ボリューム移動と記録されたジョブを隠し、コピーを1秒後に表示する")
-  func browserFactoryDelaysCopyAndHidesLocalMove() async throws {
+  @Test("ブラウザ用モデルは移動とコピーに1秒の表示遅延を適用する")
+  func browserFactoryDelaysMoveAndCopy() async throws {
     let queue = TransferQueue(store: InMemoryTransferJobStore())
     let suiteName = "TransferActivityModelTests-\(UUID().uuidString)"
     let defaults = try #require(UserDefaults(suiteName: suiteName))
@@ -521,80 +321,88 @@ struct TransferActivityModelTests {
       preferencesStore: TransferPreferencesStore(defaults: defaults),
       resume: { _ in false })
 
-    #expect(model.minimumDisplayDelay == Duration.seconds(1))
-    #expect(TransferActivityModel.browserMinimumDisplayDelay == Duration.seconds(1))
+    let delay = TransferActivityModel.browserMinimumDisplayDelay
+    #expect(delay == .seconds(1))
+    #expect(model.minimumDisplayDelay == delay)
 
-    try await withLocalTransferFiles { item, destination in
-      let moveGate = AsyncStream<Void>.makeStream()
-      let copyGate = AsyncStream<Void>.makeStream()
-      defer {
-        moveGate.continuation.finish()
-        copyGate.continuation.finish()
-      }
-      // 記録後に宛先を参照できなくなっても、モデルはフラグで表示を判断する。
-      let missingDestination = try #require(destination.appending(pathComponent: "missing"))
-      var move = makeLocalTransferJob(.move, items: [item], destination: missingDestination)
-      move.isLocalSameVolumeMove = true
-      _ = await queue.enqueue(move) { _, _ in
-        for await _ in moveGate.stream { break }
-      }
-      try await expectJobToStayHidden(move, in: model, for: .milliseconds(1_300))
-      let jobs = await queue.allJobs()
-      #expect(jobs.first(where: { $0.id == move.id })?.state == .running)
-
-      let clock = ContinuousClock()
-      let startedAt = clock.now
-      let deadline = startedAt.advanced(by: .milliseconds(1_300))
-      let copy = makeLocalTransferJob(.copy, items: [item], destination: destination)
-      _ = await queue.enqueue(copy) { _, _ in
-        for await _ in copyGate.stream { break }
-      }
-      try await waitUntil(timeout: clock.now.duration(to: deadline)) {
-        model.activeJobs.contains { $0.id == copy.id && $0.state == .running }
-      }
-      #expect(startedAt.duration(to: clock.now) >= .seconds(1))
-      #expect(!model.activeJobs.contains { $0.id == move.id })
+    func makeBrowserJob(_ kind: TransferJob.Kind) -> TransferJob {
+      TransferJob(
+        kind: kind,
+        items: [FileItem(url: URL(filePath: "/tmp/source/report.txt"), isDirectory: false)],
+        sourceProviderID: .local, destinationProviderID: .local,
+        destination: FileLocation(localURL: URL(filePath: "/tmp/destination")))
     }
-  }
 
-  @Test("既定のモデルでは同一ボリューム移動と記録されたジョブも表示する")
-  func defaultModelShowsFlaggedLocalSameVolumeMove() async throws {
-    let queue = TransferQueue(store: InMemoryTransferJobStore())
-    let model = makeModel(transferQueue: queue)
-    let gate = AsyncStream<Void>.makeStream()
-    defer { gate.continuation.finish() }
+    let clock = ContinuousClock()
+    let fastMoveGate = AsyncStream<Void>.makeStream()
+    let moveGate = AsyncStream<Void>.makeStream()
+    let copyGate = AsyncStream<Void>.makeStream()
+    defer {
+      fastMoveGate.continuation.finish()
+      moveGate.continuation.finish()
+      copyGate.continuation.finish()
+    }
+    let fastMoveStartedAt = clock.now
+    let fastMove = makeBrowserJob(.move)
+    _ = await queue.enqueue(fastMove) { _, _ in
+      for await _ in fastMoveGate.stream { break }
+    }
+    try await expectJobToStayHidden(
+      fastMove, in: model, until: fastMoveStartedAt.advanced(by: .milliseconds(100)))
+    fastMoveGate.continuation.finish()
+    try await expectJobToStayHidden(
+      fastMove, in: model, until: fastMoveStartedAt.advanced(by: delay + .milliseconds(300)))
+    let completed = try #require(await queue.allJobs().first { $0.id == fastMove.id })
+    #expect(completed.state == .completed)
+    #expect(Duration.seconds(completed.updatedAt.timeIntervalSince(completed.createdAt)) < delay)
 
-    try await withLocalTransferFiles { item, destination in
-      var move = makeLocalTransferJob(.move, items: [item], destination: destination)
-      move.isLocalSameVolumeMove = true
-      _ = await queue.enqueue(move) { _, _ in
-        for await _ in gate.stream { break }
+    let runningStartedAt = clock.now
+    let move = makeBrowserJob(.move)
+    let copy = makeBrowserJob(.copy)
+    _ = await queue.enqueue(move) { _, _ in
+      for await _ in moveGate.stream { break }
+    }
+    _ = await queue.enqueue(copy) { _, _ in
+      for await _ in copyGate.stream { break }
+    }
+
+    let displayDeadline = runningStartedAt.advanced(by: delay + .milliseconds(500))
+    let runningJobIDs: Set<UUID> = [move.id, copy.id]
+    var observedJobIDs: Set<UUID> = []
+    try await waitUntil(timeout: clock.now.duration(to: displayDeadline)) {
+      for job in model.activeJobs where runningJobIDs.contains(job.id) {
+        if observedJobIDs.insert(job.id).inserted {
+          #expect(Duration.seconds(Date.now.timeIntervalSince(job.createdAt)) >= delay)
+          #expect(job.state == .running)
+        }
       }
-      try await waitUntil {
-        model.activeJobs.contains { $0.id == move.id && $0.state == .running }
-      }
+      return observedJobIDs == runningJobIDs
     }
   }
 
   private func makeDelayedModel(
     transferQueue: TransferQueue,
-    minimumDisplayDelay: Duration,
-    isQuietJob: @escaping @MainActor (TransferJob) -> Bool = { _ in false }
+    minimumDisplayDelay: Duration
   ) -> TransferActivityModel {
     let defaults = UserDefaults(suiteName: "TransferActivityModelTests-\(UUID().uuidString)")!
     return TransferActivityModel(
       transferQueue: transferQueue,
       rateLimiter: TransferRateLimiter(),
       preferencesStore: TransferPreferencesStore(defaults: defaults),
-      minimumDisplayDelay: minimumDisplayDelay,
-      isQuietJob: isQuietJob)
+      minimumDisplayDelay: minimumDisplayDelay)
   }
 
   private func expectJobToStayHidden(
     _ job: TransferJob, in model: TransferActivityModel, for duration: Duration
   ) async throws {
+    let deadline = ContinuousClock().now.advanced(by: duration)
+    try await expectJobToStayHidden(job, in: model, until: deadline)
+  }
+
+  private func expectJobToStayHidden(
+    _ job: TransferJob, in model: TransferActivityModel, until deadline: ContinuousClock.Instant
+  ) async throws {
     let clock = ContinuousClock()
-    let deadline = clock.now.advanced(by: duration)
     var sampledAt: ContinuousClock.Instant
     repeat {
       sampledAt = clock.now
@@ -606,28 +414,6 @@ struct TransferActivityModelTests {
         try await clock.sleep(until: min(deadline, sampledAt.advanced(by: .milliseconds(5))))
       }
     } while sampledAt < deadline
-  }
-
-  private func withLocalTransferFiles(
-    _ body: (FileItem, FileLocation) async throws -> Void
-  ) async throws {
-    let fileManager = FileManager.default
-    let root = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-    try fileManager.createDirectory(at: root, withIntermediateDirectories: false)
-    defer { try? fileManager.removeItem(at: root) }
-    let source = root.appendingPathComponent("source.txt")
-    try Data("転送元".utf8).write(to: source)
-    let destination = root.appendingPathComponent("destination", isDirectory: true)
-    try fileManager.createDirectory(at: destination, withIntermediateDirectories: false)
-    try await body(FileItem(url: source, isDirectory: false), FileLocation(localURL: destination))
-  }
-
-  private func makeLocalTransferJob(
-    _ kind: TransferJob.Kind, items: [FileItem], destination: FileLocation
-  ) -> TransferJob {
-    TransferJob(
-      kind: kind, items: items, sourceProviderID: .local, destinationProviderID: .local,
-      destination: destination)
   }
 
   private func makeJob(state: TransferJob.State? = nil, updatedAt: Date? = nil) -> TransferJob {
