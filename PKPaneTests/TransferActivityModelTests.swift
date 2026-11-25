@@ -231,6 +231,191 @@ struct TransferActivityModelTests {
       store.load() == TransferPreferences(bandwidthLimitBytesPerSecond: 25_000_000))
   }
 
+  @Test("表示遅延より早く完了したジョブは一度も表示しない")
+  func neverShowsJobCompletedBeforeDelay() async throws {
+    let queue = TransferQueue(store: InMemoryTransferJobStore())
+    let delay: Duration = .milliseconds(300)
+    let model = makeDelayedModel(transferQueue: queue, minimumDisplayDelay: delay)
+    let gate = AsyncStream<Void>.makeStream()
+    defer { gate.continuation.finish() }
+    let job = makeJob()
+
+    _ = await queue.enqueue(job) { _, _ in
+      for await _ in gate.stream { break }
+    }
+    let runningObservation: Duration = .milliseconds(100)
+    try await expectJobToStayHidden(job, in: model, for: runningObservation)
+    gate.continuation.finish()
+    try await expectJobToStayHidden(
+      job, in: model, for: delay + .milliseconds(150) - runningObservation)
+
+    let jobs = await queue.allJobs()
+    let completed = try #require(jobs.first(where: { $0.id == job.id }))
+    #expect(completed.state == .completed)
+    #expect(Duration.seconds(completed.updatedAt.timeIntervalSince(completed.createdAt)) < delay)
+  }
+
+  @Test("実行中のジョブは表示遅延を過ぎるとキューの追加更新なしで表示する")
+  func showsRunningJobAfterDelayWithoutQueueUpdate() async throws {
+    let queue = TransferQueue(store: InMemoryTransferJobStore())
+    let delay: Duration = .milliseconds(300)
+    let model = makeDelayedModel(transferQueue: queue, minimumDisplayDelay: delay)
+    let gate = AsyncStream<Void>.makeStream()
+    defer { gate.continuation.finish() }
+    let clock = ContinuousClock()
+    let startedAt = clock.now
+    let job = makeJob()
+
+    _ = await queue.enqueue(job) { _, _ in
+      for await _ in gate.stream { break }
+    }
+    try await expectJobToStayHidden(job, in: model, for: delay / 2)
+    try await waitUntil(timeout: .milliseconds(650)) {
+      model.activeJobs.contains { $0.id == job.id && $0.state == .running }
+    }
+    #expect(startedAt.duration(to: clock.now) >= delay)
+  }
+
+  @Test("表示済みのジョブは完了後も猶予期間内に表示する")
+  func keepsDisplayedJobAfterCompletion() async throws {
+    let queue = TransferQueue(store: InMemoryTransferJobStore())
+    let model = makeDelayedModel(transferQueue: queue, minimumDisplayDelay: .milliseconds(300))
+    let gate = AsyncStream<Void>.makeStream()
+    defer { gate.continuation.finish() }
+    let job = makeJob()
+
+    _ = await queue.enqueue(job) { _, _ in
+      for await _ in gate.stream { break }
+    }
+    try await waitUntil {
+      model.activeJobs.contains { $0.id == job.id && $0.state == .running }
+    }
+    gate.continuation.finish()
+    try await waitUntil {
+      model.activeJobs.contains { $0.id == job.id && $0.state == .completed }
+    }
+  }
+
+  @Test("表示遅延内に失敗したジョブは遅延を待たずに表示する")
+  func showsFailedJobBeforeDelay() async throws {
+    let queue = TransferQueue(store: InMemoryTransferJobStore())
+    let delay: Duration = .seconds(2)
+    let model = makeDelayedModel(transferQueue: queue, minimumDisplayDelay: delay)
+    let job = makeJob()
+
+    _ = await queue.enqueue(job) { _, _ in throw CocoaError(.fileWriteUnknown) }
+    try await waitUntil(timeout: .seconds(1)) {
+      model.activeJobs.contains { $0.id == job.id && $0.state == .failed }
+    }
+  }
+
+  @Test("ブラウザ用モデルは移動とコピーに1秒の表示遅延を適用する")
+  func browserFactoryDelaysMoveAndCopy() async throws {
+    let queue = TransferQueue(store: InMemoryTransferJobStore())
+    let suiteName = "TransferActivityModelTests-\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suiteName))
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+    let model = TransferActivityModel.forBrowser(
+      transferQueue: queue,
+      rateLimiter: TransferRateLimiter(),
+      preferencesStore: TransferPreferencesStore(defaults: defaults),
+      resume: { _ in false })
+
+    let delay = TransferActivityModel.browserMinimumDisplayDelay
+    #expect(delay == .seconds(1))
+    #expect(model.minimumDisplayDelay == delay)
+
+    func makeBrowserJob(_ kind: TransferJob.Kind) -> TransferJob {
+      TransferJob(
+        kind: kind,
+        items: [FileItem(url: URL(filePath: "/tmp/source/report.txt"), isDirectory: false)],
+        sourceProviderID: .local, destinationProviderID: .local,
+        destination: FileLocation(localURL: URL(filePath: "/tmp/destination")))
+    }
+
+    let clock = ContinuousClock()
+    let fastMoveGate = AsyncStream<Void>.makeStream()
+    let moveGate = AsyncStream<Void>.makeStream()
+    let copyGate = AsyncStream<Void>.makeStream()
+    defer {
+      fastMoveGate.continuation.finish()
+      moveGate.continuation.finish()
+      copyGate.continuation.finish()
+    }
+    let fastMoveStartedAt = clock.now
+    let fastMove = makeBrowserJob(.move)
+    _ = await queue.enqueue(fastMove) { _, _ in
+      for await _ in fastMoveGate.stream { break }
+    }
+    try await expectJobToStayHidden(
+      fastMove, in: model, until: fastMoveStartedAt.advanced(by: .milliseconds(100)))
+    fastMoveGate.continuation.finish()
+    try await expectJobToStayHidden(
+      fastMove, in: model, until: fastMoveStartedAt.advanced(by: delay + .milliseconds(300)))
+    let completed = try #require(await queue.allJobs().first { $0.id == fastMove.id })
+    #expect(completed.state == .completed)
+    #expect(Duration.seconds(completed.updatedAt.timeIntervalSince(completed.createdAt)) < delay)
+
+    let runningStartedAt = clock.now
+    let move = makeBrowserJob(.move)
+    let copy = makeBrowserJob(.copy)
+    _ = await queue.enqueue(move) { _, _ in
+      for await _ in moveGate.stream { break }
+    }
+    _ = await queue.enqueue(copy) { _, _ in
+      for await _ in copyGate.stream { break }
+    }
+
+    let displayDeadline = runningStartedAt.advanced(by: delay + .milliseconds(500))
+    let runningJobIDs: Set<UUID> = [move.id, copy.id]
+    var observedJobIDs: Set<UUID> = []
+    try await waitUntil(timeout: clock.now.duration(to: displayDeadline)) {
+      for job in model.activeJobs where runningJobIDs.contains(job.id) {
+        if observedJobIDs.insert(job.id).inserted {
+          #expect(Duration.seconds(Date.now.timeIntervalSince(job.createdAt)) >= delay)
+          #expect(job.state == .running)
+        }
+      }
+      return observedJobIDs == runningJobIDs
+    }
+  }
+
+  private func makeDelayedModel(
+    transferQueue: TransferQueue,
+    minimumDisplayDelay: Duration
+  ) -> TransferActivityModel {
+    let defaults = UserDefaults(suiteName: "TransferActivityModelTests-\(UUID().uuidString)")!
+    return TransferActivityModel(
+      transferQueue: transferQueue,
+      rateLimiter: TransferRateLimiter(),
+      preferencesStore: TransferPreferencesStore(defaults: defaults),
+      minimumDisplayDelay: minimumDisplayDelay)
+  }
+
+  private func expectJobToStayHidden(
+    _ job: TransferJob, in model: TransferActivityModel, for duration: Duration
+  ) async throws {
+    let deadline = ContinuousClock().now.advanced(by: duration)
+    try await expectJobToStayHidden(job, in: model, until: deadline)
+  }
+
+  private func expectJobToStayHidden(
+    _ job: TransferJob, in model: TransferActivityModel, until deadline: ContinuousClock.Instant
+  ) async throws {
+    let clock = ContinuousClock()
+    var sampledAt: ContinuousClock.Instant
+    repeat {
+      sampledAt = clock.now
+      if let visibleJob = model.activeJobs.first(where: { $0.id == job.id }) {
+        Issue.record("非表示のはずのジョブが \(visibleJob.state) で表示されました")
+        return
+      }
+      if sampledAt < deadline {
+        try await clock.sleep(until: min(deadline, sampledAt.advanced(by: .milliseconds(5))))
+      }
+    } while sampledAt < deadline
+  }
+
   private func makeJob(state: TransferJob.State? = nil, updatedAt: Date? = nil) -> TransferJob {
     var job = TransferJob(
       kind: .copy, items: [], sourceProviderID: .local, destinationProviderID: .local,

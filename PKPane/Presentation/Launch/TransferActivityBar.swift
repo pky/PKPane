@@ -13,7 +13,10 @@ extension Duration {
 @Observable
 @MainActor
 final class TransferActivityModel {
+  static let browserMinimumDisplayDelay: Duration = .seconds(1)
+
   private(set) var activeJobs: [TransferJob] = []
+  let minimumDisplayDelay: Duration
   private let transferQueue: TransferQueue
   private let rateLimiter: TransferRateLimiter
   private let preferencesStore: TransferPreferencesStore
@@ -24,18 +27,24 @@ final class TransferActivityModel {
   private var dismissedJobIDs: Set<UUID> = []
   private var scheduledExpiryJobIDs: Set<UUID> = []
   @ObservationIgnored private var updateTask: Task<Void, Never>?
+  @ObservationIgnored private var latestSnapshot:
+    (jobs: [TransferJob], pauseRequestedIDs: Set<UUID>) =
+      ([], [])
+  @ObservationIgnored private var displayReevaluation: (date: Date, task: Task<Void, Never>)?
 
   init(
     transferQueue: TransferQueue = .shared,
     recentTerminalDuration: Duration = .seconds(10),
     rateLimiter: TransferRateLimiter = .shared,
     preferencesStore: TransferPreferencesStore = .shared,
+    minimumDisplayDelay: Duration = .zero,
     resume: @escaping @MainActor (TransferJob) -> Bool = { _ in false }
   ) {
     self.transferQueue = transferQueue
     self.recentTerminalDuration = recentTerminalDuration
     self.rateLimiter = rateLimiter
     self.preferencesStore = preferencesStore
+    self.minimumDisplayDelay = minimumDisplayDelay
     resumeHandler = resume
     updateTask = Task { [weak self, transferQueue] in
       for await jobs in await transferQueue.updates() {
@@ -44,6 +53,20 @@ final class TransferActivityModel {
         self.apply(jobs, pauseRequestedJobIDs: pauseRequestedJobIDs)
       }
     }
+  }
+
+  static func forBrowser(
+    transferQueue: TransferQueue = .shared,
+    rateLimiter: TransferRateLimiter = .shared,
+    preferencesStore: TransferPreferencesStore = .shared,
+    resume: @escaping @MainActor (TransferJob) -> Bool
+  ) -> TransferActivityModel {
+    TransferActivityModel(
+      transferQueue: transferQueue,
+      rateLimiter: rateLimiter,
+      preferencesStore: preferencesStore,
+      minimumDisplayDelay: browserMinimumDisplayDelay,
+      resume: resume)
   }
 
   var bandwidthLimitBytesPerSecond: Int64? {
@@ -115,15 +138,27 @@ final class TransferActivityModel {
     job.state == .paused && !resumingJobIDs.contains(job.id)
   }
 
-  /// running/queuedはすべて表示し、終了ジョブは猶予期間(recentTerminalDuration)以内の
-  /// ものだけ表示する。TransferQueueは永続化された全ジョブ(過去の起動分も含む)を保持して
-  /// いるため、この鮮度フィルタがないと起動時に古い履歴がすべてバーへ並んでしまう。
+  /// 終了ジョブには猶予期間を適用し、表示待ちのジョブがあれば最も早い時刻に再評価する。
   private func apply(_ jobs: [TransferJob], pauseRequestedJobIDs requestedIDs: Set<UUID>) {
+    latestSnapshot = (jobs, requestedIDs)
     let now = Date.now
+    let delay = minimumDisplayDelay.timeInterval
+    let terminalDuration = recentTerminalDuration.timeInterval
+    var nextDisplayAt: Date?
     let visibleJobs = jobs.filter { job in
       guard !dismissedJobIDs.contains(job.id) else { return false }
-      guard job.state.isTerminal else { return true }
-      return now.timeIntervalSince(job.updatedAt) < recentTerminalDuration.timeInterval
+      if job.state.isTerminal {
+        guard now.timeIntervalSince(job.updatedAt) < terminalDuration else { return false }
+        if job.state != .completed { return true }
+      }
+      if job.state == .completed {
+        return job.updatedAt.timeIntervalSince(job.createdAt) >= delay
+      }
+      if delay <= 0 { return true }
+      let displayAt = job.createdAt.addingTimeInterval(delay)
+      if displayAt <= now { return true }
+      nextDisplayAt = min(nextDisplayAt ?? displayAt, displayAt)
+      return false
     }
     activeJobs = Self.displayOrdered(visibleJobs)
     let runningIDs = Set(jobs.lazy.filter { $0.state == .running }.map(\.id))
@@ -135,6 +170,25 @@ final class TransferActivityModel {
     for job in activeJobs where job.state.isTerminal {
       scheduleAutoDismissIfNeeded(for: job)
     }
+    scheduleDisplayReevaluation(at: nextDisplayAt)
+  }
+
+  private func scheduleDisplayReevaluation(at date: Date?) {
+    guard displayReevaluation?.date != date else { return }
+    displayReevaluation?.task.cancel()
+    displayReevaluation = nil
+    guard let date else { return }
+
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: .seconds(date.timeIntervalSinceNow))
+    let task = Task { [weak self] in
+      try? await clock.sleep(until: deadline)
+      guard !Task.isCancelled, let self else { return }
+      self.displayReevaluation = nil
+      self.apply(
+        self.latestSnapshot.jobs, pauseRequestedJobIDs: self.latestSnapshot.pauseRequestedIDs)
+    }
+    displayReevaluation = (date, task)
   }
 
   /// TransferQueueの新しい順スナップショットを、操作と一致する表示順へ並べ替える。

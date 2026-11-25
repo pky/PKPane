@@ -396,7 +396,7 @@ struct ProviderBrowserView: View {
     _detailsInspectorWidth = detailsInspectorWidth
     self.workspace = workspace
     _transferActivity = State(
-      initialValue: TransferActivityModel(
+      initialValue: TransferActivityModel.forBrowser(
         resume: { job in workspace.resumeTransferJob(job) }))
     self.displayOptionsStore = displayOptionsStore
     self.gitStatusPreferences = gitStatusPreferences
