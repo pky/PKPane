@@ -384,6 +384,40 @@ struct TransferActivityModelTests {
     }
   }
 
+  @Test("移動元ファイルが移動済みでも同一ボリューム内のローカル移動と判定する")
+  func quietPolicyRecognizesLocalMoveAfterSourceHasMoved() async throws {
+    try await withLocalTransferFiles { item, destination in
+      let sourceURL = try #require(item.location.localURL)
+      let destinationURL = try #require(destination.localURL)
+      try FileManager.default.moveItem(
+        at: sourceURL, to: destinationURL.appendingPathComponent(item.name))
+      let move = makeLocalTransferJob(.move, items: [item], destination: destination)
+
+      #expect(TransferQuietJobPolicy.isLocalSameVolumeMove(move))
+    }
+  }
+
+  @Test("同じ親フォルダからの2万件のローカル移動を0.1秒未満で判定する")
+  func quietPolicyRecognizesTwentyThousandItemsFromOneDirectoryWithinBudget() async throws {
+    try await withLocalTransferFiles { item, destination in
+      let sourceURL = try #require(item.location.localURL)
+      let sourceDirectory = sourceURL.deletingLastPathComponent()
+      let items = (0..<20_000).map { index in
+        FileItem(
+          url: sourceDirectory.appendingPathComponent("item-\(index).txt"), isDirectory: false)
+      }
+      let move = makeLocalTransferJob(.move, items: items, destination: destination)
+
+      let clock = ContinuousClock()
+      let startedAt = clock.now
+      let isLocalMove = TransferQuietJobPolicy.isLocalSameVolumeMove(move)
+      let elapsed = startedAt.duration(to: clock.now)
+
+      #expect(isLocalMove)
+      #expect(elapsed < Duration.milliseconds(100))
+    }
+  }
+
   @Test("ブラウザ用モデルは1秒遅延し、同一ボリューム内の移動を隠してコピーを表示する")
   func browserFactoryDelaysCopyAndHidesLocalMove() async throws {
     let queue = TransferQueue(store: InMemoryTransferJobStore())
