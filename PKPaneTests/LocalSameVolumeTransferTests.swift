@@ -4,6 +4,54 @@ import Testing
 @testable import PKPane
 
 struct LocalSameVolumeTransferTests {
+  @MainActor
+  @Test(
+    "ブラウザからキューに入るローカル移動だけが同一ボリューム移動と記録される",
+    arguments: [TransferJob.Kind.move, .copy])
+  func browserSessionRecordsLocalSameVolumeMoveFlag(kind: TransferJob.Kind) async throws {
+    let queue = TransferQueue.isolatedForTesting()
+    let fileManager = FileManager.default
+    let root = fileManager.temporaryDirectory.appending(path: UUID().uuidString)
+    try fileManager.createDirectory(at: root, withIntermediateDirectories: false)
+    defer { try? fileManager.removeItem(at: root) }
+    let source = root.appending(path: "source", directoryHint: .isDirectory)
+    let destination = root.appending(path: "destination", directoryHint: .isDirectory)
+    try fileManager.createDirectory(at: source, withIntermediateDirectories: false)
+    try fileManager.createDirectory(at: destination, withIntermediateDirectories: false)
+    let fileURL = source.appending(path: "report.txt")
+    let data = Data("転送元".utf8)
+    try data.write(to: fileURL)
+
+    let suiteName = "LocalSameVolumeTransferTests-\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suiteName))
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+    let preferences = GitStatusPreferencesStore(defaults: defaults)
+    let provider = LocalFileProvider()
+    let sourceSession = FileBrowserSession(
+      provider: provider, initialLocation: FileLocation(localURL: source),
+      transferQueue: queue, gitStatusPreferences: preferences, startsBrowsing: false)
+    let destinationSession = FileBrowserSession(
+      provider: provider, initialLocation: FileLocation(localURL: destination),
+      transferQueue: queue, gitStatusPreferences: preferences, startsBrowsing: false)
+    let item = FileItem(url: fileURL, isDirectory: false, size: Int64(data.count))
+
+    switch kind {
+    case .move: sourceSession.move([item], to: destinationSession)
+    case .copy: sourceSession.copy([item], to: destinationSession)
+    }
+
+    await waitUntil("転送ジョブが期限内にキューに入らなかった") {
+      !(await queue.allJobs()).isEmpty
+    }
+    let job = try #require(await queue.allJobs().first)
+    #expect(job.kind == kind)
+    #expect(job.isLocalSameVolumeMove == (kind == .move))
+
+    await waitUntil("転送ジョブが一時フォルダの後始末前に終了しなかった") {
+      await queue.allJobs().first?.state.isTerminal == true
+    }
+  }
+
   @Test("元の親に書き込めない置換移動は元と既存宛先を保持する", arguments: [false, true])
   func failedReplacementPreservesBothItemsWhenSourceParentIsReadOnly(isDirectory: Bool) throws {
     let fileManager = FileManager.default

@@ -299,14 +299,12 @@ struct TransferActivityModelTests {
   @Test("表示遅延内に失敗したジョブは遅延を待たずに表示する")
   func showsFailedJobBeforeDelay() async throws {
     let queue = TransferQueue(store: InMemoryTransferJobStore())
-    let delay: Duration = .milliseconds(300)
+    let delay: Duration = .seconds(2)
     let model = makeDelayedModel(transferQueue: queue, minimumDisplayDelay: delay)
-    let clock = ContinuousClock()
-    let deadline = clock.now.advanced(by: delay / 2)
     let job = makeJob()
 
     _ = await queue.enqueue(job) { _, _ in throw CocoaError(.fileWriteUnknown) }
-    try await waitUntil(timeout: clock.now.duration(to: deadline)) {
+    try await waitUntil(timeout: .seconds(1)) {
       model.activeJobs.contains { $0.id == job.id && $0.state == .failed }
     }
   }
@@ -418,7 +416,57 @@ struct TransferActivityModelTests {
     }
   }
 
-  @Test("ブラウザ用モデルは1秒遅延し、同一ボリューム内の移動を隠してコピーを表示する")
+  @Test("マウントポイントは自身、通常ファイルは親フォルダのボリュームで判定する")
+  func quietPolicyQueriesMountPointAndRegularFileParent() {
+    let destination = FileLocation(localURL: URL(filePath: "/destination"))
+    let mountPoint = FileItem(url: URL(filePath: "/Volumes/External"), isDirectory: true)
+    let regularFile = FileItem(url: URL(filePath: "/Volumes/report.txt"), isDirectory: false)
+    let volumeIdentifiers = [
+      "/destination": "internal",
+      "/Volumes": "internal",
+      "/Volumes/External": "external",
+    ]
+    var queriedPaths: Set<String> = []
+    let volumeIdentifier: (URL) -> String? = { url in
+      queriedPaths.insert(url.path)
+      return volumeIdentifiers[url.path]
+    }
+
+    let directoryMove = makeLocalTransferJob(.move, items: [mountPoint], destination: destination)
+    #expect(
+      !TransferQuietJobPolicy.isLocalSameVolumeMove(
+        directoryMove, volumeIdentifier: volumeIdentifier))
+    #expect(queriedPaths.contains("/Volumes/External"))
+
+    queriedPaths.removeAll()
+    let fileMove = makeLocalTransferJob(.move, items: [regularFile], destination: destination)
+    #expect(
+      TransferQuietJobPolicy.isLocalSameVolumeMove(
+        fileMove, volumeIdentifier: volumeIdentifier))
+    #expect(queriedPaths == ["/destination", "/Volumes"])
+  }
+
+  @Test("同一ボリューム移動の記録はJSONに保存され、旧形式ではfalseになる")
+  func roundTripsLocalSameVolumeMoveFlagAndDefaultsLegacyJSONToFalse() throws {
+    var job = makeLocalTransferJob(
+      .move, items: [FileItem(url: URL(filePath: "/source/report.txt"), isDirectory: false)],
+      destination: FileLocation(localURL: URL(filePath: "/destination")))
+    #expect(!job.isLocalSameVolumeMove)
+    job.isLocalSameVolumeMove = true
+
+    let encoded = try JSONEncoder().encode(job)
+    let decoded = try JSONDecoder().decode(TransferJob.self, from: encoded)
+    #expect(decoded.isLocalSameVolumeMove)
+
+    let json = try JSONSerialization.jsonObject(with: encoded)
+    var legacy = try #require(json as? [String: Any])
+    legacy.removeValue(forKey: "isLocalSameVolumeMove")
+    let legacyData = try JSONSerialization.data(withJSONObject: legacy)
+    let legacyJob = try JSONDecoder().decode(TransferJob.self, from: legacyData)
+    #expect(!legacyJob.isLocalSameVolumeMove)
+  }
+
+  @Test("ブラウザ用モデルは同一ボリューム移動と記録されたジョブを隠し、コピーを1秒後に表示する")
   func browserFactoryDelaysCopyAndHidesLocalMove() async throws {
     let queue = TransferQueue(store: InMemoryTransferJobStore())
     let suiteName = "TransferActivityModelTests-\(UUID().uuidString)"
@@ -440,7 +488,10 @@ struct TransferActivityModelTests {
         moveGate.continuation.finish()
         copyGate.continuation.finish()
       }
-      let move = makeLocalTransferJob(.move, items: [item], destination: destination)
+      // 記録後に宛先を参照できなくなっても、モデルはフラグで表示を判断する。
+      let missingDestination = try #require(destination.appending(pathComponent: "missing"))
+      var move = makeLocalTransferJob(.move, items: [item], destination: missingDestination)
+      move.isLocalSameVolumeMove = true
       _ = await queue.enqueue(move) { _, _ in
         for await _ in moveGate.stream { break }
       }
@@ -460,6 +511,25 @@ struct TransferActivityModelTests {
       }
       #expect(startedAt.duration(to: clock.now) >= .seconds(1))
       #expect(!model.activeJobs.contains { $0.id == move.id })
+    }
+  }
+
+  @Test("既定のモデルでは同一ボリューム移動と記録されたジョブも表示する")
+  func defaultModelShowsFlaggedLocalSameVolumeMove() async throws {
+    let queue = TransferQueue(store: InMemoryTransferJobStore())
+    let model = makeModel(transferQueue: queue)
+    let gate = AsyncStream<Void>.makeStream()
+    defer { gate.continuation.finish() }
+
+    try await withLocalTransferFiles { item, destination in
+      var move = makeLocalTransferJob(.move, items: [item], destination: destination)
+      move.isLocalSameVolumeMove = true
+      _ = await queue.enqueue(move) { _, _ in
+        for await _ in gate.stream { break }
+      }
+      try await waitUntil {
+        model.activeJobs.contains { $0.id == move.id && $0.state == .running }
+      }
     }
   }
 
