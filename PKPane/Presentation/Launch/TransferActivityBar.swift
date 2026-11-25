@@ -29,7 +29,6 @@ final class TransferActivityModel {
   private var scheduledExpiryJobIDs: Set<UUID> = []
   @ObservationIgnored private var updateTask: Task<Void, Never>?
   @ObservationIgnored private var quietJobsByID: [UUID: Bool] = [:]
-  @ObservationIgnored private var displayedJobIDs: Set<UUID> = []
   @ObservationIgnored private var latestSnapshot:
     (jobs: [TransferJob], pauseRequestedIDs: Set<UUID>) =
       ([], [])
@@ -158,18 +157,14 @@ final class TransferActivityModel {
         if job.state != .completed { return true }
       }
       guard !isQuiet(job) else { return false }
-      if delay <= 0 { return true }
       if job.state == .completed {
-        return displayedJobIDs.contains(job.id)
-          || job.updatedAt.timeIntervalSince(job.createdAt) >= delay
+        return job.updatedAt.timeIntervalSince(job.createdAt) >= delay
       }
+      if delay <= 0 { return true }
       let displayAt = job.createdAt.addingTimeInterval(delay)
       if displayAt <= now { return true }
       nextDisplayAt = min(nextDisplayAt ?? displayAt, displayAt)
       return false
-    }
-    if delay > 0 {
-      displayedJobIDs.formUnion(visibleJobs.lazy.map(\.id))
     }
     activeJobs = Self.displayOrdered(visibleJobs)
     let runningIDs = Set(jobs.lazy.filter { $0.state == .running }.map(\.id))

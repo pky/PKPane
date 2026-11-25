@@ -37,10 +37,29 @@ enum LocalSameVolumeTransfer {
 
 enum TransferQuietJobPolicy {
   static func isLocalSameVolumeMove(_ job: TransferJob) -> Bool {
-    guard job.kind == .move, !job.items.isEmpty else { return false }
-    return job.items.allSatisfy {
-      LocalSameVolumeTransfer.canMove($0.fileItem, toDirectory: job.destination)
+    guard job.kind == .move, !job.items.isEmpty,
+      let destinationURL = job.destination.localURL,
+      let destinationIdentifier = volumeIdentifier(for: destinationURL)
+    else { return false }
+
+    var checkedSourcePaths: Set<String> = []
+    for item in job.items {
+      guard let sourceURL = item.location.localURL else { return false }
+      // 移動が完了してから判定する場合も、元の親フォルダで照会できる。
+      let sourceDirectory = sourceURL.deletingLastPathComponent()
+      if checkedSourcePaths.insert(sourceDirectory.path).inserted {
+        guard volumeIdentifier(for: sourceDirectory) == destinationIdentifier else { return false }
+      }
     }
+    return true
+  }
+
+  private static func volumeIdentifier(for url: URL) -> String? {
+    var uncachedURL = url
+    uncachedURL.removeAllCachedResourceValues()
+    let values = try? uncachedURL.resourceValues(forKeys: [.volumeIdentifierKey])
+    guard let identifier = values?.volumeIdentifier else { return nil }
+    return String(reflecting: identifier)
   }
 }
 
