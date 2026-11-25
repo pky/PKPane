@@ -36,25 +36,32 @@ enum LocalSameVolumeTransfer {
 }
 
 enum TransferQuietJobPolicy {
-  static func isLocalSameVolumeMove(_ job: TransferJob) -> Bool {
+  static func isLocalSameVolumeMove(
+    _ job: TransferJob,
+    volumeIdentifier: (URL) -> String? = systemVolumeIdentifier
+  ) -> Bool {
     guard job.kind == .move, !job.items.isEmpty,
       let destinationURL = job.destination.localURL,
-      let destinationIdentifier = volumeIdentifier(for: destinationURL)
+      let destinationIdentifier = volumeIdentifier(destinationURL)
     else { return false }
 
-    var checkedSourcePaths: Set<String> = []
+    var checkedParentPaths: Set<String> = []
     for item in job.items {
       guard let sourceURL = item.location.localURL else { return false }
-      // 移動が完了してから判定する場合も、元の親フォルダで照会できる。
+      // フォルダがマウントポイントなら、親と異なるボリュームに属する。
+      if item.isDirectory || item.isSymbolicLink {
+        guard volumeIdentifier(sourceURL) == destinationIdentifier else { return false }
+        continue
+      }
       let sourceDirectory = sourceURL.deletingLastPathComponent()
-      if checkedSourcePaths.insert(sourceDirectory.path).inserted {
-        guard volumeIdentifier(for: sourceDirectory) == destinationIdentifier else { return false }
+      if checkedParentPaths.insert(sourceDirectory.path).inserted {
+        guard volumeIdentifier(sourceDirectory) == destinationIdentifier else { return false }
       }
     }
     return true
   }
 
-  private static func volumeIdentifier(for url: URL) -> String? {
+  static func systemVolumeIdentifier(_ url: URL) -> String? {
     var uncachedURL = url
     uncachedURL.removeAllCachedResourceValues()
     let values = try? uncachedURL.resourceValues(forKeys: [.volumeIdentifierKey])

@@ -5290,7 +5290,7 @@ final class FileBrowserSession {
     // と同じmakeAutoRetryPlannerを登録し、TransferQueueが失敗を検知したら自動的に
     // バックオフ・再試行してくれるようにする。
     let autoRetryPlanner = makeAutoRetryPlanner(pending: pending, jobID: job.id)
-    Task { [weak self, transferQueue] in
+    Task { [weak self, transferQueue, job] in
       let sizeAggregation = Task {
         await Self.transferSizes(
           of: items, using: sourceProvider,
@@ -5311,8 +5311,14 @@ final class FileBrowserSession {
           try await transferQueue.recordReservedDestinationName(
             name, for: location, jobID: reservedJobID)
         })
+      var queuedJob = job
+      if job.kind == .move {
+        queuedJob.isLocalSameVolumeMove = await Task.detached {
+          TransferQuietJobPolicy.isLocalSameVolumeMove(job)
+        }.value
+      }
       _ = await transferQueue.enqueue(
-        job, execution: execution, autoRetryPlanner: autoRetryPlanner)
+        queuedJob, execution: execution, autoRetryPlanner: autoRetryPlanner)
       await transferQueue.applyAggregatedTotalBytes(
         job.id, totalBytes: sizeAggregation.value.total)
       guard let self else { return }

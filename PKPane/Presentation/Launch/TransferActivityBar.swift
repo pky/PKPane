@@ -70,7 +70,7 @@ final class TransferActivityModel {
       rateLimiter: rateLimiter,
       preferencesStore: preferencesStore,
       minimumDisplayDelay: browserMinimumDisplayDelay,
-      isQuietJob: TransferQuietJobPolicy.isLocalSameVolumeMove,
+      isQuietJob: { $0.isLocalSameVolumeMove },
       resume: resume)
   }
 

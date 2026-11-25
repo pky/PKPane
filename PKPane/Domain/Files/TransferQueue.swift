@@ -117,6 +117,7 @@ struct TransferJob: Codable, Equatable, Identifiable, Sendable {
   /// FileBrowserSession側の自動リトライ対象から外し、既存の手動リトライUIへ直行させる。
   var isReconnectFutile: Bool
   var skippedItemCount: Int
+  var isLocalSameVolumeMove: Bool
 
   init(
     id: UUID = UUID(),
@@ -152,13 +153,14 @@ struct TransferJob: Codable, Equatable, Identifiable, Sendable {
     completedItems = []
     isReconnectFutile = false
     skippedItemCount = 0
+    isLocalSameVolumeMove = false
   }
 
   private enum CodingKeys: CodingKey {
     case id, kind, items, sourceProviderID, sourceAccessBookmarkData, destinationProviderID,
       destination, createdAt, state,
       completedBytes, totalBytes, errorDescription, startedAt, updatedAt, completedItems,
-      isReconnectFutile, skippedItemCount
+      isReconnectFutile, skippedItemCount, isLocalSameVolumeMove
   }
 
   /// completedItems/isReconnectFutileは追加したフィールドのため、ディスク上に残る
@@ -186,6 +188,8 @@ struct TransferJob: Codable, Equatable, Identifiable, Sendable {
     isReconnectFutile =
       try container.decodeIfPresent(Bool.self, forKey: .isReconnectFutile) ?? false
     skippedItemCount = try container.decodeIfPresent(Int.self, forKey: .skippedItemCount) ?? 0
+    isLocalSameVolumeMove =
+      try container.decodeIfPresent(Bool.self, forKey: .isLocalSameVolumeMove) ?? false
   }
 
   var throughputBytesPerSecond: Double? {
