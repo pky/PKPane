@@ -117,7 +117,6 @@ struct TransferJob: Codable, Equatable, Identifiable, Sendable {
   /// FileBrowserSession側の自動リトライ対象から外し、既存の手動リトライUIへ直行させる。
   var isReconnectFutile: Bool
   var skippedItemCount: Int
-  var isLocalSameVolumeMove: Bool
 
   init(
     id: UUID = UUID(),
@@ -153,14 +152,13 @@ struct TransferJob: Codable, Equatable, Identifiable, Sendable {
     completedItems = []
     isReconnectFutile = false
     skippedItemCount = 0
-    isLocalSameVolumeMove = false
   }
 
   private enum CodingKeys: CodingKey {
     case id, kind, items, sourceProviderID, sourceAccessBookmarkData, destinationProviderID,
       destination, createdAt, state,
       completedBytes, totalBytes, errorDescription, startedAt, updatedAt, completedItems,
-      isReconnectFutile, skippedItemCount, isLocalSameVolumeMove
+      isReconnectFutile, skippedItemCount
   }
 
   /// completedItems/isReconnectFutileは追加したフィールドのため、ディスク上に残る
@@ -188,8 +186,6 @@ struct TransferJob: Codable, Equatable, Identifiable, Sendable {
     isReconnectFutile =
       try container.decodeIfPresent(Bool.self, forKey: .isReconnectFutile) ?? false
     skippedItemCount = try container.decodeIfPresent(Int.self, forKey: .skippedItemCount) ?? 0
-    isLocalSameVolumeMove =
-      try container.decodeIfPresent(Bool.self, forKey: .isLocalSameVolumeMove) ?? false
   }
 
   var throughputBytesPerSecond: Double? {
@@ -612,14 +608,6 @@ actor TransferQueue {
       return []
     }
     return job.completedItems
-  }
-
-  /// 表示の判定結果を反映し、終了行の表示時間に使う updatedAt は保持する。
-  func markLocalSameVolumeMove(_ id: UUID) {
-    guard let index = jobs.firstIndex(where: { $0.id == id }), !jobs[index].isLocalSameVolumeMove
-    else { return }
-    jobs[index].isLocalSameVolumeMove = true
-    persistAndPublish()
   }
 
   /// 並行実行される事前サイズ集計の結果を、遅れて到着した時点でジョブへ反映する。

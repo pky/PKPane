@@ -35,41 +35,6 @@ enum LocalSameVolumeTransfer {
   }
 }
 
-enum TransferQuietJobPolicy {
-  static func isLocalSameVolumeMove(
-    _ job: TransferJob,
-    volumeIdentifier: (URL) -> String? = systemVolumeIdentifier
-  ) -> Bool {
-    guard job.kind == .move, !job.items.isEmpty,
-      let destinationURL = job.destination.localURL,
-      let destinationIdentifier = volumeIdentifier(destinationURL)
-    else { return false }
-
-    var checkedParentPaths: Set<String> = []
-    for item in job.items {
-      guard let sourceURL = item.location.localURL else { return false }
-      // フォルダがマウントポイントなら、親と異なるボリュームに属する。
-      if item.isDirectory || item.isSymbolicLink {
-        guard volumeIdentifier(sourceURL) == destinationIdentifier else { return false }
-        continue
-      }
-      let sourceDirectory = sourceURL.deletingLastPathComponent()
-      if checkedParentPaths.insert(sourceDirectory.path).inserted {
-        guard volumeIdentifier(sourceDirectory) == destinationIdentifier else { return false }
-      }
-    }
-    return true
-  }
-
-  static func systemVolumeIdentifier(_ url: URL) -> String? {
-    var uncachedURL = url
-    uncachedURL.removeAllCachedResourceValues()
-    let values = try? uncachedURL.resourceValues(forKeys: [.volumeIdentifierKey])
-    guard let identifier = values?.volumeIdentifier else { return nil }
-    return String(reflecting: identifier)
-  }
-}
-
 /// stagingや削除より前に、元と宛先の実体関係をローカル全経路で確認する。
 enum LocalTransferLocationValidator {
   enum Relation: Equatable {

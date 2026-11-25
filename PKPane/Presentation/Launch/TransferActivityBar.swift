@@ -21,7 +21,6 @@ final class TransferActivityModel {
   private let rateLimiter: TransferRateLimiter
   private let preferencesStore: TransferPreferencesStore
   private let recentTerminalDuration: Duration
-  @ObservationIgnored private let isQuietJob: @MainActor (TransferJob) -> Bool
   @ObservationIgnored private let resumeHandler: @MainActor (TransferJob) -> Bool
   private var pauseRequestedJobIDs: Set<UUID> = []
   private var resumingJobIDs: Set<UUID> = []
@@ -39,7 +38,6 @@ final class TransferActivityModel {
     rateLimiter: TransferRateLimiter = .shared,
     preferencesStore: TransferPreferencesStore = .shared,
     minimumDisplayDelay: Duration = .zero,
-    isQuietJob: @escaping @MainActor (TransferJob) -> Bool = { _ in false },
     resume: @escaping @MainActor (TransferJob) -> Bool = { _ in false }
   ) {
     self.transferQueue = transferQueue
@@ -47,7 +45,6 @@ final class TransferActivityModel {
     self.rateLimiter = rateLimiter
     self.preferencesStore = preferencesStore
     self.minimumDisplayDelay = minimumDisplayDelay
-    self.isQuietJob = isQuietJob
     resumeHandler = resume
     updateTask = Task { [weak self, transferQueue] in
       for await jobs in await transferQueue.updates() {
@@ -69,7 +66,6 @@ final class TransferActivityModel {
       rateLimiter: rateLimiter,
       preferencesStore: preferencesStore,
       minimumDisplayDelay: browserMinimumDisplayDelay,
-      isQuietJob: { $0.isLocalSameVolumeMove },
       resume: resume)
   }
 
@@ -155,7 +151,6 @@ final class TransferActivityModel {
         guard now.timeIntervalSince(job.updatedAt) < terminalDuration else { return false }
         if job.state != .completed { return true }
       }
-      guard !isQuietJob(job) else { return false }
       if job.state == .completed {
         return job.updatedAt.timeIntervalSince(job.createdAt) >= delay
       }
