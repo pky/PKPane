@@ -40,15 +40,81 @@ struct LocalSameVolumeTransferTests {
     case .copy: sourceSession.copy([item], to: destinationSession)
     }
 
-    await waitUntil("転送ジョブが期限内にキューに入らなかった") {
-      !(await queue.allJobs()).isEmpty
+    await waitUntil("転送ジョブが一時フォルダの後始末前に終了しなかった") {
+      await queue.allJobs().first?.state.isTerminal == true
+    }
+    if kind == .move {
+      await waitUntil("同一ボリューム移動の判定結果が期限内に記録されなかった") {
+        await queue.allJobs().first?.isLocalSameVolumeMove == true
+      }
     }
     let job = try #require(await queue.allJobs().first)
     #expect(job.kind == kind)
     #expect(job.isLocalSameVolumeMove == (kind == .move))
+  }
 
-    await waitUntil("転送ジョブが一時フォルダの後始末前に終了しなかった") {
-      await queue.allJobs().first?.state.isTerminal == true
+  @MainActor
+  @Test("移動の判定を待たず開始順に登録し、判定が終わったら移動にフラグを立てる")
+  func browserSessionEnqueuesMoveBeforeCheckAndPreservesTransferOrder() async throws {
+    let queue = TransferQueue.isolatedForTesting()
+    let gate = LocalSameVolumeMoveCheckGate()
+    let fileManager = FileManager.default
+    let root = fileManager.temporaryDirectory.appending(path: UUID().uuidString)
+    try fileManager.createDirectory(at: root, withIntermediateDirectories: false)
+    defer { try? fileManager.removeItem(at: root) }
+    let source = root.appending(path: "source", directoryHint: .isDirectory)
+    let destination = root.appending(path: "destination", directoryHint: .isDirectory)
+    try fileManager.createDirectory(at: source, withIntermediateDirectories: false)
+    try fileManager.createDirectory(at: destination, withIntermediateDirectories: false)
+    let moveURL = source.appending(path: "move.txt")
+    let copyURL = source.appending(path: "copy.txt")
+    let data = Data("転送元".utf8)
+    try data.write(to: moveURL)
+    try data.write(to: copyURL)
+
+    let suiteName = "LocalSameVolumeTransferTests-\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suiteName))
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+    let preferences = GitStatusPreferencesStore(defaults: defaults)
+    let provider = LocalFileProvider()
+    let sourceSession = FileBrowserSession(
+      provider: provider, initialLocation: FileLocation(localURL: source),
+      transferQueue: queue, gitStatusPreferences: preferences, startsBrowsing: false,
+      localSameVolumeMoveCheck: { job in await gate.check(job) })
+    let destinationSession = FileBrowserSession(
+      provider: provider, initialLocation: FileLocation(localURL: destination),
+      transferQueue: queue, gitStatusPreferences: preferences, startsBrowsing: false)
+    let move = FileItem(url: moveURL, isDirectory: false, size: Int64(data.count))
+    let copy = FileItem(url: copyURL, isDirectory: false, size: Int64(data.count))
+
+    sourceSession.move([move], to: destinationSession)
+    await waitUntil(timeout: .seconds(2), "移動の判定が期限内に始まらなかった") {
+      await gate.checkedJobID != nil
+    }
+    await waitUntil(timeout: .seconds(2), "移動が判定を待たずに登録されなかった") {
+      await queue.allJobs().contains { $0.kind == .move }
+    }
+    let jobsBeforeCopy = await queue.allJobs()
+    #expect(jobsBeforeCopy.map(\.kind) == [.move])
+    #expect(jobsBeforeCopy.first?.id == (await gate.checkedJobID))
+    #expect(jobsBeforeCopy.first?.isLocalSameVolumeMove == false)
+
+    sourceSession.copy([copy], to: destinationSession)
+    await waitUntil(timeout: .seconds(2), "コピーが判定を待たずに登録されなかった") {
+      await queue.allJobs().contains { $0.kind == .copy }
+    }
+    // allJobs() は後から登録したジョブを先に返す。
+    let jobsBeforeOpeningGate = await queue.allJobs()
+    #expect(jobsBeforeOpeningGate.map(\.kind) == [.copy, .move])
+    #expect(jobsBeforeOpeningGate.first { $0.kind == .move }?.isLocalSameVolumeMove == false)
+
+    await gate.open()
+    await waitUntil("クリーンアップ前に移動とコピーの両方が終了しなかった") {
+      let jobs = await queue.allJobs()
+      return jobs.count == 2 && jobs.allSatisfy { $0.state.isTerminal }
+    }
+    await waitUntil("ゲートを開けても同一ボリューム移動のフラグが立たなかった") {
+      await queue.allJobs().first { $0.kind == .move }?.isLocalSameVolumeMove == true
     }
   }
 
@@ -552,6 +618,23 @@ struct LocalSameVolumeTransferTests {
     #expect(sourceSession.canRetryLastTransfer)
     #expect(FileManager.default.fileExists(atPath: fileURL.path))
     #expect(try Data(contentsOf: existingURL) == Data("既存内容".utf8))
+  }
+}
+
+private actor LocalSameVolumeMoveCheckGate {
+  private(set) var checkedJobID: UUID?
+  private var isOpen = false
+
+  func check(_ job: TransferJob) async -> Bool {
+    guard job.kind == .move else { return false }
+    checkedJobID = job.id
+    return await waitUntil(timeout: .seconds(10), "移動判定のゲートが期限内に開かなかった") {
+      isOpen
+    }
+  }
+
+  func open() {
+    isOpen = true
   }
 }
 

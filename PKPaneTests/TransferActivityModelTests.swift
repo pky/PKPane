@@ -333,35 +333,78 @@ struct TransferActivityModelTests {
     }
   }
 
-  @Test("進捗が複数回更新されても静かなジョブの判定は同じIDで一度だけ行う")
-  func evaluatesQuietPolicyOnceAcrossProgressUpdates() async throws {
-    let queue = TransferQueue(store: InMemoryTransferJobStore())
-    var evaluations: [UUID: Int] = [:]
-    let delay: Duration = .milliseconds(300)
-    let model = makeDelayedModel(transferQueue: queue, minimumDisplayDelay: delay) { job in
-      evaluations[job.id, default: 0] += 1
-      return false
+  @Test("同一ボリューム移動の記録をキューの購読者へ通知し、未知のIDは無視する")
+  func queuePublishesLocalSameVolumeMoveFlagForExistingJob() async throws {
+    let store = InMemoryTransferJobStore()
+    var job = makeLocalTransferJob(
+      .move, items: [FileItem(url: URL(filePath: "/source/report.txt"), isDirectory: false)],
+      destination: FileLocation(localURL: URL(filePath: "/destination")))
+    job.state = .completed
+    try store.save([job])
+    let queue = TransferQueue(store: store)
+    let updates = await queue.updates()
+    var snapshots: [[TransferJob]] = []
+    let observation = Task { @MainActor in
+      for await snapshot in updates {
+        snapshots.append(snapshot)
+        if snapshots.count == 2 { break }
+      }
     }
-    let reports = AsyncStream<Int64>.makeStream()
-    defer { reports.continuation.finish() }
-    let job = makeJob()
+    defer { observation.cancel() }
 
-    _ = await queue.enqueue(job) { reportProgress, _ in
-      for await completedBytes in reports.stream {
-        await reportProgress(FileTransferProgress(completedBytes: completedBytes, totalBytes: 100))
-      }
+    await queue.markLocalSameVolumeMove(UUID())
+    #expect(await queue.allJobs() == [job])
+
+    await queue.markLocalSameVolumeMove(job.id)
+    let markedJob = try #require(await queue.allJobs().first)
+    #expect(markedJob.id == job.id)
+    #expect(markedJob.isLocalSameVolumeMove)
+    #expect(markedJob.state == .completed)
+    try await waitUntil { snapshots.count == 2 }
+    #expect(snapshots.first == [job])
+    // 未知のIDで通知した場合、実際にフラグを立てる前の一覧が2件目に届く。
+    #expect(snapshots.dropFirst().first == [markedJob])
+  }
+
+  @Test("記録が表示遅延より前なら移動を隠し、表示後なら一覧から消す", arguments: [true, false])
+  func hidesRunningMoveWhenFlagArrivesBeforeOrAfterDisplay(markBeforeDelay: Bool) async throws {
+    let queue = TransferQueue(store: InMemoryTransferJobStore())
+    let delay: Duration = .milliseconds(300)
+    let model = makeDelayedModel(
+      transferQueue: queue, minimumDisplayDelay: delay, isQuietJob: { $0.isLocalSameVolumeMove })
+    let gate = AsyncStream<Void>.makeStream()
+    defer { gate.continuation.finish() }
+    let job = makeLocalTransferJob(
+      .move, items: [FileItem(url: URL(filePath: "/source/report.txt"), isDirectory: false)],
+      destination: FileLocation(localURL: URL(filePath: "/destination")))
+
+    _ = await queue.enqueue(job) { _, _ in
+      for await _ in gate.stream { break }
     }
-    try await waitUntil {
-      model.activeJobs.contains { $0.id == job.id && $0.state == .running }
-    }
-    let progressValues: [Int64] = [10, 20, 30]
-    for completedBytes in progressValues {
-      reports.continuation.yield(completedBytes)
+    let earlyObservation: Duration = .milliseconds(100)
+    if markBeforeDelay {
+      try await expectJobToStayHidden(job, in: model, for: earlyObservation)
+    } else {
       try await waitUntil {
-        model.activeJobs.contains { $0.id == job.id && $0.completedBytes == completedBytes }
+        model.activeJobs.contains { $0.id == job.id && $0.state == .running }
       }
     }
-    #expect(evaluations[job.id] == 1)
+
+    let runningJob = try #require(await queue.allJobs().first)
+    #expect(runningJob.state == .running)
+    #expect(!runningJob.isLocalSameVolumeMove)
+    if markBeforeDelay {
+      #expect(Duration.seconds(Date.now.timeIntervalSince(job.createdAt)) < delay)
+    }
+    await queue.markLocalSameVolumeMove(job.id)
+
+    if markBeforeDelay {
+      try await expectJobToStayHidden(
+        job, in: model, for: delay + .milliseconds(150) - earlyObservation)
+    } else {
+      try await waitUntil { !model.activeJobs.contains { $0.id == job.id } }
+    }
+    #expect(await queue.allJobs().first?.state == .running)
   }
 
   @Test("静かなジョブの判定は項目のある同一ボリューム内のローカル移動に限る")
