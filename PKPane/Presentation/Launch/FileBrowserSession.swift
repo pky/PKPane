@@ -4957,8 +4957,16 @@ final class FileBrowserSession {
     in directoryLocation: FileLocation
   ) async throws {
     guard isDisplayedArchiveDirectory(directoryLocation) else { return }
-    let loadedItems = try await loadItems(
-      at: directoryLocation, includingHidden: showsHiddenFiles, publishesPartialResults: false)
+    let loadedItems =
+      if treeState.isExpanded(directoryLocation),
+        currentLocation != directoryLocation,
+        !columnState.columns.contains(where: { $0.location == directoryLocation })
+      {
+        try await provider.contents(of: directoryLocation, includingHidden: showsHiddenFiles)
+      } else {
+        try await loadItems(
+          at: directoryLocation, includingHidden: showsHiddenFiles, publishesPartialResults: false)
+      }
     try Task.checkCancellation()
     // ZIP作成中にナビゲーションや折りたたみが行われた場合は、現在の表示状態へ
     // 古い列挙結果や選択要求を混入させない。
@@ -4995,6 +5003,9 @@ final class FileBrowserSession {
       }) ?? loadedItems.first(where: { $0.name == archiveName })
     else { return }
     if let columnIndex {
+      if archiveItem.isDirectory {
+        directoryCache[archiveItem.location] = nil
+      }
       selectColumnItems([archiveItem.url], inColumnAt: columnIndex)
     }
     revealGeneration &+= 1
