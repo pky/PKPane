@@ -470,6 +470,26 @@ enum FileColumnScrollVisibility {
   }
 }
 
+enum FileColumnRevealScroll {
+  /// revealRequest を受けたときに横スクロールで見せるカラムの場所。
+  /// 表示対象の項目が見つからなければ nil。
+  static func targetLocation(
+    in columns: [FileBrowserColumn], for request: FileItemRevealRequest
+  ) -> FileLocation? {
+    guard let index = columns.firstIndex(where: { $0.location == request.directoryLocation }),
+      let item = columns[index].items.first(where: { $0.url == request.itemURL })
+    else { return nil }
+
+    let rightIndex = index + 1
+    if item.isDirectory, columns.indices.contains(rightIndex),
+      columns[rightIndex].location == item.location
+    {
+      return columns[rightIndex].location
+    }
+    return request.directoryLocation
+  }
+}
+
 private enum FileColumnScrollCoordinateSpace {
   static let name = "file-column-browser-scroll"
 }
@@ -568,12 +588,9 @@ private struct FileColumnBrowserView<NameCell: View>: View {
         }
         .onChange(of: revealRequest) { _, request in
           guard let request,
-            columns.contains(where: {
-              $0.location == request.directoryLocation
-                && $0.items.contains(where: { $0.url == request.itemURL })
-            })
+            let location = FileColumnRevealScroll.targetLocation(in: columns, for: request)
           else { return }
-          requestScroll(to: request.directoryLocation, anchor: .trailing)
+          requestScroll(to: location, anchor: .trailing)
         }
         .contextMenu {
           fileContextMenuContent(backgroundContextMenuItems())
