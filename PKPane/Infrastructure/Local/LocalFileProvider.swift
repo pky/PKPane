@@ -28,6 +28,9 @@ struct LocalFileProvider {
     ) throws -> Void
   /// iCloud の属性取得は応答しないことがあるため、専用キューと期限付きの読み出し口を使う。
   let cloudStatusReader: CloudStatusResourceReader
+  private let trashItem: @Sendable (URL) throws -> Void
+  private let isSandboxed: @Sendable () -> Bool
+  private let writeAccessGrants: any FolderWriteAccessGrantStoring
 
   init(
     isLocalVolume: @escaping @Sendable (URL) -> Bool = LocalFileProvider.systemIsLocalVolume,
@@ -40,13 +43,21 @@ struct LocalFileProvider {
       @escaping @Sendable (
         URL, URL, @escaping @Sendable () -> Bool, (@Sendable (Int64) -> Void)?
       ) throws -> Void = LocalFileProvider.defaultCancellableCopy,
-    cloudStatusReader: CloudStatusResourceReader = .shared
+    cloudStatusReader: CloudStatusResourceReader = .shared,
+    moveToTrash: @escaping @Sendable (URL) throws -> Void = {
+      try FileManager.default.trashItem(at: $0, resultingItemURL: nil)
+    },
+    isSandboxed: @escaping @Sendable () -> Bool = { FolderBookmarkAccessManager.isSandboxed },
+    writeAccessGrants: any FolderWriteAccessGrantStoring = FolderWriteAccessGrantStore.shared
   ) {
     self.isLocalVolume = isLocalVolume
     self.isOnSameVolumeOverride = isOnSameVolumeOverride
     self.crossVolumeMoveCopy = crossVolumeMoveCopy
     self.cancellableCopy = cancellableCopy
     self.cloudStatusReader = cloudStatusReader
+    trashItem = moveToTrash
+    self.isSandboxed = isSandboxed
+    self.writeAccessGrants = writeAccessGrants
   }
 
   private static func defaultCrossVolumeMoveCopy(
@@ -173,7 +184,7 @@ struct LocalFileProvider {
   }
 
   func moveToTrash(_ url: URL) throws {
-    try FileManager.default.trashItem(at: url, resultingItemURL: nil)
+    try trashItem(url)
   }
 
   func copy(
@@ -416,7 +427,41 @@ extension LocalFileProvider: FileBrowserTrashProvider {
     guard item.location.providerID == id else {
       throw LocalFileProviderError.invalidLocation
     }
-    try moveToTrash(item.url)
+    do {
+      try moveToTrash(item.url)
+    } catch  where Self.isTrashPermissionError(error) {
+      let permissionError = FileBrowserOperationError.insufficientPermission(itemName: item.name)
+      let directory = item.url.deletingLastPathComponent()
+      guard isSandboxed(),
+        !FolderWriteAccessGrantStore.covers(
+          directory, from: URL(filePath: "/System", directoryHint: .isDirectory))
+      else { throw permissionError }
+
+      switch writeAccessGrants.activateGrant(covering: directory) {
+      case .none:
+        throw FileBrowserOperationError.writeAccessRequired(directory: directory)
+      case .alreadyActive:
+        throw permissionError
+      case .activated:
+        do {
+          try moveToTrash(item.url)
+        } catch  where Self.isTrashPermissionError(error) {
+          throw permissionError
+        }
+      }
+    }
+  }
+
+  private static func isTrashPermissionError(_ error: Error) -> Bool {
+    let error = error as NSError
+    if error.domain == NSCocoaErrorDomain, error.code == CocoaError.fileWriteNoPermission.rawValue {
+      return true
+    }
+    let posixError =
+      error.domain == NSPOSIXErrorDomain
+      ? error : error.userInfo[NSUnderlyingErrorKey] as? NSError
+    guard let posixError, posixError.domain == NSPOSIXErrorDomain else { return false }
+    return posixError.code == Int(EPERM) || posixError.code == Int(EACCES)
   }
 }
 

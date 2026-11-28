@@ -90,6 +90,11 @@ private final class ColumnDirectoryDateRace: Sendable {
   }
 }
 
+struct FileBrowserWriteAccessRequest: Sendable {
+  let directory: URL
+  let items: [FileItem]
+}
+
 struct FileItemRevealRequest: Equatable, Sendable {
   let generation: Int
   let itemURL: URL
@@ -216,6 +221,7 @@ final class FileBrowserSession {
   }
 
   private let provider: any FileBrowserProvider
+  private let writeAccessGrants: any FolderWriteAccessGrantStoring
   private let navigationBoundary: FileLocation?
   private let hasExternalParent: Bool
   private let workspaceBookmarkAccessLease: WorkspaceBookmarkAccessLease?
@@ -427,6 +433,7 @@ final class FileBrowserSession {
   private(set) var lastCompletedTransfer: CompletedTransfer?
   var transferResolutionNotice: String?
   private(set) var pendingPermanentDeleteItems: [FileItem] = []
+  private(set) var pendingWriteAccessRequest: FileBrowserWriteAccessRequest?
   private(set) var isArchiving = false
   private(set) var archiveProgress: ArchiveProgress?
   private(set) var revealRequest: FileItemRevealRequest?
@@ -476,9 +483,11 @@ final class FileBrowserSession {
     gitStatusProvider: any GitStatusProviding = GitStatusService(),
     directoryCacheLimit: Int = DirectorySnapshotCachePolicy.directoryLimit,
     startsBrowsing: Bool = true,
-    workspaceBookmarkAccessLease: WorkspaceBookmarkAccessLease? = nil
+    workspaceBookmarkAccessLease: WorkspaceBookmarkAccessLease? = nil,
+    writeAccessGrants: any FolderWriteAccessGrantStoring = FolderWriteAccessGrantStore.shared
   ) {
     self.provider = provider
+    self.writeAccessGrants = writeAccessGrants
     currentLocation = initialLocation
     directoryCache = LRUDictionary(capacity: directoryCacheLimit)
     self.directoryCacheLimit = directoryCacheLimit
@@ -2875,6 +2884,14 @@ final class FileBrowserSession {
   }
 
   func delete(_ items: [FileItem]) {
+    guard pendingWriteAccessRequest == nil else { return }
+    delete(items, grantingWriteAccessTo: nil)
+  }
+
+  private func delete(
+    _ items: [FileItem],
+    grantingWriteAccessTo grantedDirectory: URL?
+  ) {
     guard !items.isEmpty else { return }
     guard !isLoading else { return }
     guard let operations = provider as? any FileBrowserOperationProvider else {
@@ -2885,16 +2902,39 @@ final class FileBrowserSession {
     isLoading = true
     Task { [weak self] in
       guard let self else { return }
+      defer {
+        isPerformingFileOperation = false
+        isLoading = false
+        consumePendingWatcherEventIfNeeded()
+        purgeRetiredBrowsingSnapshot()
+        notifyRetiredLifecycleDidBecomeIdle()
+      }
       var itemsWithoutTrash = [FileItem]()
       var removedLocations = Set<FileLocation>()
+      var writeAccessRequest: FileBrowserWriteAccessRequest?
+      var permissionError: FileBrowserOperationError?
       do {
-        for item in items {
+        if let grantedDirectory {
+          try await Task.detached(priority: .userInitiated) { [writeAccessGrants] in
+            try writeAccessGrants.save(grantedDirectory)
+          }.value
+          guard !isRetiredFromBrowsing else { return }
+        }
+        for (index, item) in items.enumerated() {
           try Task.checkCancellation()
           do {
             try await operations.delete(item)
             removedLocations.insert(item.location)
           } catch FileBrowserOperationError.trashUnavailable {
             itemsWithoutTrash.append(item)
+          } catch FileBrowserOperationError.writeAccessRequired(let directory) {
+            if directory.standardizedFileURL.path == grantedDirectory?.standardizedFileURL.path {
+              permissionError = .insufficientPermission(itemName: item.name)
+            } else {
+              writeAccessRequest = FileBrowserWriteAccessRequest(
+                directory: directory, items: Array(items[index...]))
+            }
+            break
           }
         }
         try await refreshContents()
@@ -2904,12 +2944,27 @@ final class FileBrowserSession {
         presentError(error)
       }
       removeSearchResults(at: removedLocations)
-      isPerformingFileOperation = false
-      isLoading = false
-      consumePendingWatcherEventIfNeeded()
-      purgeRetiredBrowsingSnapshot()
-      notifyRetiredLifecycleDidBecomeIdle()
+      if let permissionError {
+        presentError(permissionError)
+      } else if let writeAccessRequest, !isRetiredFromBrowsing {
+        pendingWriteAccessRequest = writeAccessRequest
+      }
     }
+  }
+
+  func grantWriteAccess(_ selectedURL: URL) {
+    guard let request = pendingWriteAccessRequest, !isLoading else { return }
+    pendingWriteAccessRequest = nil
+    guard FolderWriteAccessGrantStore.covers(request.directory, from: selectedURL) else {
+      presentError(
+        FileBrowserOperationError.writeAccessFolderMismatch(directory: request.directory))
+      return
+    }
+    delete(request.items, grantingWriteAccessTo: request.directory)
+  }
+
+  func cancelWriteAccessRequest() {
+    pendingWriteAccessRequest = nil
   }
 
   func confirmPermanentDelete() {
@@ -3799,6 +3854,7 @@ final class FileBrowserSession {
   }
 
   private func stopBrowsingResources() {
+    pendingWriteAccessRequest = nil
     cancelSearch(clearText: true, clearRevealRequest: true)
     loadTask?.cancel()
     revalidationTask?.cancel()
@@ -3870,7 +3926,8 @@ final class FileBrowserSession {
       transferQueue: transferQueue,
       gitStatusPreferences: gitStatusPreferences,
       directoryCacheLimit: directoryCacheLimit,
-      workspaceBookmarkAccessLease: workspaceBookmarkAccessLease)
+      workspaceBookmarkAccessLease: workspaceBookmarkAccessLease,
+      writeAccessGrants: writeAccessGrants)
     peer.setShowsHiddenFiles(showsHiddenFiles, reload: false)
     peer.retainedRecentAccessLeases = retainedRecentAccessLeases
     if let parent = location?.localURL?.standardizedFileURL {
@@ -3903,7 +3960,8 @@ final class FileBrowserSession {
       gitStatusPreferences: gitStatusPreferences,
       directoryCacheLimit: directoryCacheLimit,
       startsBrowsing: false,
-      workspaceBookmarkAccessLease: workspaceBookmarkAccessLease)
+      workspaceBookmarkAccessLease: workspaceBookmarkAccessLease,
+      writeAccessGrants: writeAccessGrants)
     destination.setShowsHiddenFiles(showsHiddenFiles, reload: false)
     return destination
   }

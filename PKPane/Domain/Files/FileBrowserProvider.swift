@@ -68,11 +68,25 @@ protocol FileBrowserDuplicateProvider: FileBrowserOperationProvider {
 
 enum FileBrowserOperationError: LocalizedError {
   case trashUnavailable
+  case writeAccessRequired(directory: URL)
+  case writeAccessFolderMismatch(directory: URL)
+  case insufficientPermission(itemName: String)
 
   var errorDescription: String? {
     switch self {
     case .trashUnavailable:
       "この接続ではゴミ箱へ移動できません。"
+    case .writeAccessRequired:
+      String(localized: "フォルダへの書き込み許可が必要です")
+    case .writeAccessFolderMismatch(let directory):
+      String(
+        format: String(localized: "選択したフォルダに「%@」が含まれていません。"),
+        directory.lastPathComponent)
+    case .insufficientPermission(let itemName):
+      String(
+        format: String(
+          localized: "「%@」を削除する権限がありません。管理者が所有する項目(App Store からインストールしたアプリなど)は Finder で削除してください。"),
+        itemName)
     }
   }
 }

@@ -132,8 +132,16 @@ enum PKPaneErrorClassifier {
     if error is SFTPTransferStallError {
       return preserving(error, as: .timeout)
     }
-    if error is FileBrowserOperationError || error is FileBrowserSessionError
-      || error is ProviderFileTransferServiceError || error is LocalFileProviderError
+    if let error = error as? FileBrowserOperationError {
+      switch error {
+      case .trashUnavailable:
+        return preserving(error, as: .unsupported)
+      case .writeAccessRequired, .writeAccessFolderMismatch, .insufficientPermission:
+        return preserving(error, as: .accessDenied)
+      }
+    }
+    if error is FileBrowserSessionError || error is ProviderFileTransferServiceError
+      || error is LocalFileProviderError
     {
       return preserving(error, as: .unsupported)
     }
