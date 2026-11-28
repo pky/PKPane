@@ -431,9 +431,12 @@ extension LocalFileProvider: FileBrowserTrashProvider {
       try moveToTrash(item.url)
     } catch  where Self.isTrashPermissionError(error) {
       let permissionError = FileBrowserOperationError.insufficientPermission(itemName: item.name)
-      guard isSandboxed() else { throw permissionError }
-
       let directory = item.url.deletingLastPathComponent()
+      guard isSandboxed(),
+        !FolderWriteAccessGrantStore.covers(
+          directory, from: URL(filePath: "/System", directoryHint: .isDirectory))
+      else { throw permissionError }
+
       switch writeAccessGrants.activateGrant(covering: directory) {
       case .none:
         throw FileBrowserOperationError.writeAccessRequired(directory: directory)

@@ -2885,12 +2885,12 @@ final class FileBrowserSession {
 
   func delete(_ items: [FileItem]) {
     guard pendingWriteAccessRequest == nil else { return }
-    delete(items, grantingWriteAccess: nil)
+    delete(items, grantingWriteAccessTo: nil)
   }
 
   private func delete(
     _ items: [FileItem],
-    grantingWriteAccess grant: (selectedURL: URL, directory: URL)?
+    grantingWriteAccessTo grantedDirectory: URL?
   ) {
     guard !items.isEmpty else { return }
     guard !isLoading else { return }
@@ -2914,9 +2914,9 @@ final class FileBrowserSession {
       var writeAccessRequest: FileBrowserWriteAccessRequest?
       var permissionError: FileBrowserOperationError?
       do {
-        if let grant {
+        if let grantedDirectory {
           try await Task.detached(priority: .userInitiated) { [writeAccessGrants] in
-            try writeAccessGrants.save(grant.selectedURL)
+            try writeAccessGrants.save(grantedDirectory)
           }.value
           guard !isRetiredFromBrowsing else { return }
         }
@@ -2928,7 +2928,7 @@ final class FileBrowserSession {
           } catch FileBrowserOperationError.trashUnavailable {
             itemsWithoutTrash.append(item)
           } catch FileBrowserOperationError.writeAccessRequired(let directory) {
-            if directory.standardizedFileURL.path == grant?.directory.standardizedFileURL.path {
+            if directory.standardizedFileURL.path == grantedDirectory?.standardizedFileURL.path {
               permissionError = .insufficientPermission(itemName: item.name)
             } else {
               writeAccessRequest = FileBrowserWriteAccessRequest(
@@ -2948,7 +2948,6 @@ final class FileBrowserSession {
         presentError(permissionError)
       } else if let writeAccessRequest, !isRetiredFromBrowsing {
         pendingWriteAccessRequest = writeAccessRequest
-        errorMessage = nil
       }
     }
   }
@@ -2961,7 +2960,7 @@ final class FileBrowserSession {
         FileBrowserOperationError.writeAccessFolderMismatch(directory: request.directory))
       return
     }
-    delete(request.items, grantingWriteAccess: (selectedURL, request.directory))
+    delete(request.items, grantingWriteAccessTo: request.directory)
   }
 
   func cancelWriteAccessRequest() {
