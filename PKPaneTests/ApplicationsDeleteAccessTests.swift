@@ -6,9 +6,14 @@ import Testing
 @testable import PKPane
 
 struct LocalFileProviderDeleteAccessTests {
-  private let directory = URL(filePath: "/System/Applications", directoryHint: .isDirectory)
+  private let directory = URL(
+    filePath: "/Library/PKPaneDeleteAccessSample", directoryHint: .isDirectory)
 
   private var item: FileItem {
+    item(in: directory)
+  }
+
+  private func item(in directory: URL) -> FileItem {
     FileItem(
       remotePath: "/Applications/PKPaneSample.app",
       url: directory.appending(path: "PKPaneSample.app", directoryHint: .isDirectory),
@@ -125,6 +130,48 @@ struct LocalFileProviderDeleteAccessTests {
     #expect(grants.activationCalls.map(\.path) == [directory.path])
     #expect(grants.savedDirectories.isEmpty)
   }
+
+  @Test("P7 実URLの親が/System配下なら保存済みの許可を調べず権限不足を返す")
+  func reportsPermissionDenialForSystemDirectoryWithoutLookingUpGrants() async {
+    let directory = URL(filePath: "/System/Applications", directoryHint: .isDirectory)
+    let item = item(in: directory)
+    let grants = WriteAccessGrantsSpy()
+    let trash = MoveToTrashSpy(errors: [NSError(domain: NSPOSIXErrorDomain, code: Int(EPERM))])
+    let provider = LocalFileProvider(
+      moveToTrash: trash.move, isSandboxed: { true }, writeAccessGrants: grants)
+
+    do {
+      try await provider.delete(item)
+      Issue.record("権限不足を報告せず削除が完了した")
+    } catch FileBrowserOperationError.insufficientPermission(let itemName) {
+      #expect(itemName == item.name)
+    } catch {
+      Issue.record("権限不足と異なるエラーが返った: \(error)")
+    }
+    #expect(trash.calls == [item.url])
+    #expect(grants.activationCalls.isEmpty)
+    #expect(grants.savedDirectories.isEmpty)
+  }
+
+  @Test("P8 /SystemX配下では実URLの親に書き込み許可を求める")
+  func requiresWriteAccessOutsideTheSystemPathComponent() async throws {
+    let directory = URL(filePath: "/SystemX/Applications", directoryHint: .isDirectory)
+    let item = item(in: directory)
+    let grants = WriteAccessGrantsSpy()
+    let trash = MoveToTrashSpy(errors: [NSError(domain: NSPOSIXErrorDomain, code: Int(EPERM))])
+    let provider = LocalFileProvider(
+      moveToTrash: trash.move, isSandboxed: { true }, writeAccessGrants: grants)
+
+    do {
+      try await provider.delete(item)
+      Issue.record("書き込み許可を要求せず削除が完了した")
+    } catch FileBrowserOperationError.writeAccessRequired(let requestedDirectory) {
+      #expect(requestedDirectory.standardizedFileURL.path == directory.path)
+    }
+    #expect(trash.calls == [item.url])
+    #expect(grants.activationCalls.map(\.path) == [directory.path])
+    #expect(grants.savedDirectories.isEmpty)
+  }
 }
 
 @MainActor
@@ -211,13 +258,42 @@ struct FileBrowserSessionDeleteAccessTests {
     #expect(session.errorMessage == nil)
   }
 
+  @Test("S6 祖先フォルダを選ぶと要求されたフォルダの許可を1回保存し、残りの削除を再開する")
+  func savesRequestedDirectoryWhenAncestorIsSelectedAndResumesDeletion() async throws {
+    let (session, provider, grants, items) = try await startDeletion()
+    let request = try #require(session.pendingWriteAccessRequest)
+
+    session.grantWriteAccess(request.directory.deletingLastPathComponent())
+    await waitUntil { !session.isLoading && session.items.isEmpty }
+
+    #expect(grants.savedDirectories == [request.directory])
+    #expect(await provider.deleteCalls == Array(items.prefix(2)) + Array(items.dropFirst()))
+    #expect(session.pendingWriteAccessRequest == nil)
+    #expect(session.errorMessage == nil)
+  }
+
+  @Test("S7 先に削除した項目の一覧を再読込できなければ、許可要求と再読込エラーを表示する")
+  func preservesClassifiedReloadErrorWhenRequestingWriteAccess() async throws {
+    let reloadError = CocoaError(.fileReadNoPermission)
+    let (session, provider, grants, items) = try await startDeletion(reloadError: reloadError)
+
+    let request = try #require(session.pendingWriteAccessRequest)
+    #expect(request.directory == applications)
+    #expect(request.items == Array(items.dropFirst()))
+    #expect(await provider.deleteCalls == Array(items.prefix(2)))
+    #expect(await provider.reloadFailures == 1)
+    #expect(session.errorMessage == PKPaneErrorClassifier.classify(reloadError).displayMessage)
+    #expect(grants.savedDirectories.isEmpty)
+  }
+
   private var applications: URL {
     root.appending(path: "Applications", directoryHint: .isDirectory)
   }
 
   private func startDeletion(
     withSearch: Bool = false,
-    deniesAfterGrant: Bool = false
+    deniesAfterGrant: Bool = false,
+    reloadError: CocoaError? = nil
   ) async throws -> (
     FileBrowserSession, WriteAccessRequiredProvider, WriteAccessGrantsSpy, [FileItem]
   ) {
@@ -232,6 +308,7 @@ struct FileBrowserSessionDeleteAccessTests {
     let location = FileLocation(localURL: directory)
     let provider = WriteAccessRequiredProvider(
       location: location, items: items, blocked: blocked, directory: directory,
+      reloadError: reloadError,
       canDeleteBlockedItem: { !deniesAfterGrant && !grants.savedDirectories.isEmpty })
     let session = FileBrowserSession(
       provider: provider, initialLocation: location, transferQueue: .isolatedForTesting(),
@@ -342,26 +419,36 @@ private actor WriteAccessRequiredProvider: FileBrowserTrashProvider {
   private let location: FileLocation
   private let blocked: FileItem
   private let directory: URL
+  private let reloadError: CocoaError?
   private let canDeleteBlockedItem: @Sendable () -> Bool
   private var items: [FileItem]
+  private var hasDeletedItem = false
   private(set) var deleteCalls: [FileItem] = []
+  private(set) var reloadFailures = 0
 
   init(
     location: FileLocation,
     items: [FileItem],
     blocked: FileItem,
     directory: URL,
+    reloadError: CocoaError?,
     canDeleteBlockedItem: @escaping @Sendable () -> Bool
   ) {
     self.location = location
     self.items = items
     self.blocked = blocked
     self.directory = directory
+    self.reloadError = reloadError
     self.canDeleteBlockedItem = canDeleteBlockedItem
   }
 
   func contents(of location: FileLocation) async throws -> [FileItem] {
-    location == self.location ? items : []
+    guard location == self.location else { return [] }
+    if hasDeletedItem, let reloadError {
+      reloadFailures += 1
+      throw reloadError
+    }
+    return items
   }
 
   nonisolated func parent(of _: FileLocation) -> FileLocation? { nil }
@@ -382,6 +469,7 @@ private actor WriteAccessRequiredProvider: FileBrowserTrashProvider {
       throw FileBrowserOperationError.writeAccessRequired(directory: directory)
     }
     items.removeAll { $0 == item }
+    hasDeletedItem = true
   }
 }
 
