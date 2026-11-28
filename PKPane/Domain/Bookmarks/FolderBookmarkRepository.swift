@@ -843,7 +843,7 @@ final class FolderBookmarkAccessManager {
     throw FolderBookmarkAccessError.accessDenied
   }
 
-  private static var isSandboxed: Bool {
+  nonisolated static var isSandboxed: Bool {
     guard let task = SecTaskCreateFromSelf(nil) else {
       return true
     }

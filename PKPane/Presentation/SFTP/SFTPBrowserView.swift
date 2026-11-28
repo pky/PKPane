@@ -409,7 +409,7 @@ struct ProviderBrowserView: View {
   }
 
   var body: some View {
-    mainContent
+    withWriteAccessPrompt(mainContent)
       .sheet(item: folderComparisonModelBinding) { model in
         FolderComparisonView(model: model)
       }
@@ -803,6 +803,48 @@ struct ProviderBrowserView: View {
       Button("OK") { remoteEditController.clearError() }
     } message: {
       Text(remoteEditController.errorMessage ?? "")
+    }
+  }
+
+  private func withWriteAccessPrompt(_ content: some View) -> some View {
+    let browser = activeModel
+    return content.alert(
+      "フォルダへの書き込み許可が必要です",
+      isPresented: Binding(
+        get: { browser.pendingWriteAccessRequest != nil },
+        set: { if !$0 { browser.cancelWriteAccessRequest() } }),
+      presenting: browser.pendingWriteAccessRequest
+    ) { request in
+      Button("許可…") {
+        requestWriteAccess(to: request.directory, for: browser)
+      }
+      Button("キャンセル", role: .cancel) {
+        browser.cancelWriteAccessRequest()
+      }
+    } message: { request in
+      Text(
+        String(
+          format: String(
+            localized: "PKPaneには「%@」を変更する許可がありません。次の画面でこのフォルダを選んで「許可」を押すと、削除を続けます。"),
+          request.directory.lastPathComponent))
+    }
+  }
+
+  private func requestWriteAccess(to directory: URL, for browser: FileBrowserSession) {
+    let panel = NSOpenPanel()
+    panel.canChooseFiles = false
+    panel.canChooseDirectories = true
+    panel.allowsMultipleSelection = false
+    panel.canCreateDirectories = false
+    panel.directoryURL = directory
+    panel.prompt = String(localized: "許可")
+    panel.message = String(
+      format: String(localized: "「%@」を選んで「許可」を押すと、削除を続けます。"),
+      directory.lastPathComponent)
+    if panel.runModal() == .OK, let url = panel.url {
+      browser.grantWriteAccess(url)
+    } else {
+      browser.cancelWriteAccessRequest()
     }
   }
 

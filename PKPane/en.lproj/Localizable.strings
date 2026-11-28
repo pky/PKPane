@@ -124,6 +124,12 @@
 "失敗した項目: %@" = "Failed items: %@";
 "この接続では名前を変更できません。" = "Renaming is unavailable for this connection.";
 "ゴミ箱へ移動" = "Move to Trash";
+"フォルダへの書き込み許可が必要です" = "Folder Write Access Required";
+"PKPaneには「%@」を変更する許可がありません。次の画面でこのフォルダを選んで「許可」を押すと、削除を続けます。" = "PKPane needs permission to modify “%@”. Select this folder and click Allow to continue deleting.";
+"許可…" = "Allow…";
+"「%@」を選んで「許可」を押すと、削除を続けます。" = "Select “%@” and click Allow to continue deleting.";
+"選択したフォルダに「%@」が含まれていません。" = "The selected folder does not contain “%@”.";
+"「%@」を削除する権限がありません。管理者が所有する項目(App Store からインストールしたアプリなど)は Finder で削除してください。" = "You don’t have permission to delete “%@”. Use Finder to delete items owned by an administrator, such as apps installed from the App Store.";
 "取り消す" = "Undo";
 "コピー" = "Copy";
 "カット" = "Cut";
